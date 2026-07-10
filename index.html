@@ -9,33 +9,53 @@
 <body>
   <!-- TELA DE LOGIN -->
   <div id="login-screen" class="login-screen">
+    <button class="login-theme-toggle" id="btn-login-theme" onclick="toggleTheme()" title="Alternar tema">🌙</button>
     <div class="login-box">
       <div class="login-logo">
-        <svg width="48" height="48" viewBox="0 0 48 48" fill="none"><rect width="48" height="48" rx="12" fill="#3b82f6"/><path d="M14 16h20v4H14zM14 24h20v4H14zM18 32h12v4H18z" fill="#fff"/></svg>
+        <div class="login-icon">
+          <svg width="30" height="30" viewBox="0 0 48 48" fill="none"><rect width="48" height="48" rx="12" fill="#3b82f6"/><path d="M14 16h20v4H14zM14 24h20v4H14zM18 32h12v4H18z" fill="#fff"/></svg>
+        </div>
         <h1>OPS Vision</h1>
         <p>Gestão Empresarial & Operacional</p>
       </div>
-      <div class="login-form">
+      <div class="login-form" id="login-form-enter">
         <div class="form-group">
-          <label>Usuário</label>
-          <input type="text" id="login-username" placeholder="Nome de usuário" value="gab">
+          <label>Email</label>
+          <input type="email" id="login-email" placeholder="seu@email.com">
         </div>
         <div class="form-group">
           <label>Senha</label>
-          <input type="password" id="login-password" placeholder="Senha" value="123">
+          <input type="password" id="login-password" placeholder="Sua senha">
+        </div>
+        <div class="login-error" id="login-error" style="display:none;color:var(--red);font-size:.82rem;margin-bottom:.5rem;text-align:center"></div>
+        <button id="btn-login" class="btn btn-primary btn-full">Entrar</button>
+        <p style="text-align:center;margin-top:.75rem;font-size:.8rem;color:var(--text-muted)">
+          Ainda não tem conta? <a href="#" id="link-show-signup" style="color:var(--blue)">Criar conta</a>
+        </p>
+      </div>
+      <div class="login-form" id="login-form-signup" style="display:none">
+        <div class="form-group">
+          <label>Nome da Empresa</label>
+          <input type="text" id="signup-company" placeholder="Minha Empresa">
+        </div>
+        <input type="hidden" id="signup-type" value="gestor">
+        <div class="form-group">
+          <label>Seu Nome</label>
+          <input type="text" id="signup-name" placeholder="Seu nome completo">
         </div>
         <div class="form-group">
-          <label>Tipo de Usuário</label>
-          <select id="login-type">
-            <option value="gestor">Gestor</option>
-            <option value="funcionario">Funcionário</option>
-          </select>
+          <label>Email</label>
+          <input type="email" id="signup-email" placeholder="seu@email.com">
         </div>
         <div class="form-group">
-          <label>Selecione seu Perfil</label>
-          <select id="login-profile"></select>
+          <label>Senha</label>
+          <input type="password" id="signup-password" placeholder="Crie uma senha (mín. 4 caracteres)">
         </div>
-        <button id="btn-login" class="btn btn-primary btn-full">Entrar no Sistema</button>
+        <div class="login-error" id="signup-error" style="display:none;color:var(--red);font-size:.82rem;margin-bottom:.5rem;text-align:center"></div>
+        <button id="btn-signup" class="btn btn-primary btn-full">Criar Conta</button>
+        <p style="text-align:center;margin-top:.75rem;font-size:.8rem;color:var(--text-muted)">
+          Já tem conta? <a href="#" id="link-show-login" style="color:var(--blue)">Fazer login</a>
+        </p>
       </div>
     </div>
   </div>
@@ -78,11 +98,11 @@
           <span>Notificações</span>
           <span class="nav-badge" id="notif-nav-badge">0</span>
         </a>
-        <a href="#" data-page="map" class="nav-item">
+        <a href="#" data-page="map" class="nav-item" id="nav-map">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
           <span>Mapa Operacional</span>
         </a>
-        <a href="#" data-page="settings" class="nav-item">
+        <a href="#" data-page="settings" class="nav-item" id="nav-settings">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.32 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
           <span>Configurações</span>
         </a>
@@ -110,6 +130,7 @@
           <h2 class="page-title" id="page-title">Dashboard</h2>
         </div>
         <div class="topbar-right">
+          <button class="btn-toggle-sidebar" id="btn-theme-toggle" onclick="toggleTheme()" title="Alternar tema" style="padding:.4rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:1rem">🌙</button>
           <div class="search-box">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input type="text" id="global-search" placeholder="Buscar tarefas, pessoas...">

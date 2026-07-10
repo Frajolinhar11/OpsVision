@@ -530,55 +530,112 @@ function renderPage(page) {
 /* ============================================
    LOGIN
    ============================================ */
-const profileMap = {
-  1: { name: 'Carlos Silva', role: 'Analista Operacional' },
-  2: { name: 'Ana Oliveira', role: 'Supervisora' },
-  3: { name: 'Bruno Costa', role: 'Técnico de Segurança' },
-  4: { name: 'Daniela Souza', role: 'Recepcionista' },
-  5: { name: 'Eduardo Lima', role: 'Analista de TI' },
-  6: { name: 'Fernanda Rocha', role: 'Coordenadora' },
-  7: { name: 'Gabriel Santos', role: 'Auxiliar Adm.' },
-  8: { name: 'Helena Martins', role: 'Analista de RH' },
-};
 
-function renderLoginProfiles() {
-  const type = document.getElementById('login-type').value;
-  const select = document.getElementById('login-profile');
-  select.innerHTML = '';
-  if (type === 'gestor') {
-    select.innerHTML = '<option value="1">Admin OpsFlow - Gestor Geral</option>';
-  } else {
-    select.innerHTML = Object.entries(profileMap).map(([id, p]) =>
-      `<option value="${id}">${p.name} - ${p.role}</option>`
-    ).join('');
+function toggleLoginForm(showSignup) {
+  document.getElementById('login-form-enter').style.display = showSignup ? 'none' : 'block';
+  document.getElementById('login-form-signup').style.display = showSignup ? 'block' : 'none';
+  document.getElementById('login-error').style.display = 'none';
+  document.getElementById('signup-error').style.display = 'none';
+}
+
+async function doSignup() {
+  const companyName = document.getElementById('signup-company').value.trim();
+  const name = document.getElementById('signup-name').value.trim();
+  const email = document.getElementById('signup-email').value.trim();
+  const password = document.getElementById('signup-password').value.trim();
+  const errEl = document.getElementById('signup-error');
+
+  if (!companyName || !name || !email || !password) {
+    errEl.textContent = 'Preencha todos os campos.';
+    errEl.style.display = 'block'; return;
   }
+  if (password.length < 4) {
+    errEl.textContent = 'Senha deve ter no mínimo 4 caracteres.';
+    errEl.style.display = 'block'; return;
+  }
+
+  errEl.textContent = 'Criando conta...';
+  errEl.style.display = 'block';
+
+  const { company, error: cErr } = await db.createCompany(companyName);
+  if (cErr || !company) {
+    errEl.textContent = 'Erro ao criar empresa: ' + (cErr || 'desconhecido');
+    errEl.style.display = 'block'; return;
+  }
+
+  const result = await db.signup(email, password, name, company.id, 'gestor');
+  if (result.error) {
+    errEl.textContent = 'Erro: ' + result.error;
+    errEl.style.display = 'block'; return;
+  }
+
+  const loggedIn = await db.login(email, password);
+  if (loggedIn) {
+    App.state.user = loggedIn;
+    afterLogin();
+    if (loggedIn.company_code) {
+      setTimeout(() => {
+        alert('📌 Código da sua empresa: ' + loggedIn.company_code + '\nCompartilhe com seus funcionários para eles se cadastrarem.');
+      }, 1000);
+    }
+    return;
+  }
+
+  errEl.textContent = 'Conta criada! Faça login.';
+  errEl.style.color = 'var(--green)';
+  document.getElementById('login-email').value = email;
+  setTimeout(() => toggleLoginForm(false), 2000);
 }
 
 async function doLogin() {
-  const username = document.getElementById('login-username').value.trim();
+  const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value.trim();
-  const type = document.getElementById('login-type').value;
-  const profileVal = document.getElementById('login-profile').value;
-  const empId = parseInt(profileVal);
+  const errEl = document.getElementById('login-error');
 
-  // Try custom auth first
-  if (type === 'gestor' && username && password) {
-    const user = await db.login(username, password);
-    if (user) {
-      App.state.user = { id: user.id, name: user.name, role: user.role, type: user.type, initials: user.initials };
-      afterLogin();
-      return;
-    }
+  if (!email || !password) {
+    errEl.textContent = 'Preencha email e senha.';
+    errEl.style.display = 'block';
+    return;
   }
 
-  // Fallback: use selected profile
-  if (type === 'gestor') {
-    App.state.user = { id: 9, name: 'Admin OpsFlow', role: 'Gestor Geral', type: 'gestor', initials: 'AO' };
-  } else {
-    const p = profileMap[empId] || { name: 'Funcionário', role: '' };
-    App.state.user = { id: empId, name: p.name, role: p.role, type: 'funcionario', initials: getInitials(p.name) };
+  const user = await db.login(email, password);
+  if (!user) {
+    errEl.textContent = 'Email ou senha inválidos.';
+    errEl.style.display = 'block';
+    return;
   }
+
+  errEl.style.display = 'none';
+  App.state.user = user;
   afterLogin();
+}
+
+async function checkExistingSession() {
+  const user = await db.getSession();
+  if (user) {
+    App.state.user = user;
+    afterLogin();
+    return true;
+  }
+  return false;
+}
+
+async function ensureEmployeeRecord() {
+  try {
+    const u = App.state.user;
+    if (!u || !u.company_id) return;
+    // Check if employee exists using raw query (bypass db._companyId)
+    const { data: emps } = await sb.from('employees').select('id').eq('company_id', u.company_id).eq('id', u.id).limit(1);
+    if (emps && emps[0]) return;
+    // Create employee record directly
+    await sb.from('employees').insert({
+      id: u.id,
+      company_id: u.company_id,
+      name: u.name,
+      role: u.type === 'gestor' ? 'Gestor' : 'Funcionário',
+      status: 'free',
+    });
+  } catch (e) { console.warn('ensureEmployeeRecord:', e); }
 }
 
 function afterLogin() {
@@ -595,9 +652,15 @@ function afterLogin() {
     document.getElementById('page-tasks').classList.add('funcionario-view');
   }
 
+  // Hide gestor-only nav items for funcionários
+  document.getElementById('nav-settings').style.display = isGestorUser ? '' : 'none';
+
   updateUserUI();
   navigateTo('dashboard');
   updateNotificationsBadge();
+
+  // Ensure user has an employee record (auto-create if missing)
+  ensureEmployeeRecord();
 
   // Request notification permission for browser popups
   if ('Notification' in window && Notification.permission === 'default') {
@@ -620,12 +683,15 @@ function updateUserUI() {
   document.getElementById('topbar-role').textContent = u.role;
 }
 
-function doLogout() {
+async function doLogout() {
   App.state.user = null;
   _cache = { employees: null, tasks: null, meetings: null, participants: null, notifications: null, allocations: null, sectors: null, recurrenceOptions: null };
+  cleanupRealtime();
+  await db.logout();
   document.getElementById('app').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
-  renderLoginProfiles();
+  document.getElementById('login-password').value = '';
+  updateNotificationsBadge();
 }
 
 /* ============================================
@@ -800,8 +866,7 @@ function drawProductivityChart(allTasks, employees) {
   const pad = { top: 30, bottom: 40, left: 40, right: 20 };
 
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#1a1a3e';
-  ctx.fillRect(0, 0, w, h);
+
 
   const data = employees.map(emp => {
     const total = allTasks.filter(t => t.assignee === emp.id).length;
@@ -853,8 +918,6 @@ function drawTasksStatusChart(allTasks) {
   const w = canvas.width, h = canvas.height;
 
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#1a1a3e';
-  ctx.fillRect(0, 0, w, h);
 
   const statuses = [
     { key: 'pending', label: 'Pendente', color: '#f59e0b', count: allTasks.filter(t => t.status === 'pending').length },
@@ -1055,11 +1118,16 @@ async function renderTeam() {
   const schedules = await getCachedSchedules();
   const today = todayBrasil();
 
+  if (!employees.length) {
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;padding:2rem;color:var(--text-muted)">Nenhum funcionário cadastrado ainda. <br><small>Use "Adicionar" para criar um.</small></div>`;
+    return;
+  }
+
   grid.innerHTML = employees.map(emp => {
     const onVacation = schedules.some(s => s.employee_id === emp.id && s.start_date <= today && s.end_date >= today && s.type === 'vacation');
     const statusLabel = onVacation ? 'Ferias' : emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa';
     return `
-    <div class="employee-card">
+    <div class="employee-card" onclick="showEmployeeCard(${emp.id})">
       <div class="emp-avatar" style="background:${randomColor(emp.name)}">${getInitials(emp.name)}</div>
       <div class="emp-name">${emp.name}</div>
       <div class="emp-role">${emp.role}</div>
@@ -1067,14 +1135,35 @@ async function renderTeam() {
         <span style="width:6px;height:6px;border-radius:50%;background:currentColor"></span>
         ${statusLabel}
       </div>
-      <div class="emp-actions">
-        <button class="btn btn-sm btn-ghost" onclick="showEmployeeTasks(${emp.id})">📋 Tarefas</button>
-        ${isGestor() ? `
-        <button class="btn btn-sm btn-secondary" onclick="editEmployee(${emp.id})">Editar</button>
-        <button class="btn btn-sm btn-danger" onclick="deleteEmployee(${emp.id})">Remover</button>` : ''}
-      </div>
     </div>
   `}).join('');
+}
+
+async function showEmployeeCard(empId) {
+  const employees = await getCachedEmployees();
+  const emp = employees.find(e => e.id === empId);
+  if (!emp) return;
+  const schedules = await getCachedSchedules();
+  const today = todayBrasil();
+  const onVacation = schedules.some(s => s.employee_id === emp.id && s.start_date <= today && s.end_date >= today && s.type === 'vacation');
+  const statusLabel = onVacation ? 'Ferias' : emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa';
+  const actions = isGestor() ? `
+    <div class="form-row" style="margin-top:1.25rem;flex-wrap:wrap;gap:.5rem">
+      <button class="btn btn-primary" onclick="closeModal();createEmployeeLogin(${emp.id})">🔑 Criar Login</button>
+      <button class="btn btn-secondary" onclick="closeModal();showEmployeeTasks(${emp.id})">📋 Tarefas</button>
+      <button class="btn btn-secondary" onclick="closeModal();editEmployee(${emp.id})">Editar</button>
+      <button class="btn btn-danger" onclick="closeModal();deleteEmployee(${emp.id})">Remover</button>
+    </div>` : '';
+  openModal(emp.name, `
+    <div style="text-align:center;margin-bottom:1rem">
+      <div class="emp-avatar" style="background:${randomColor(emp.name)};width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:700;margin:0 auto .75rem">${getInitials(emp.name)}</div>
+      <div style="font-size:.82rem;color:var(--text-secondary)">${emp.role}</div>
+      <div style="margin-top:.5rem;display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:20px;font-size:.75rem;font-weight:500;background:${onVacation ? 'rgba(139,92,246,.15)' : emp.status === 'free' ? 'rgba(16,185,129,.15)' : emp.status === 'busy' ? 'rgba(239,68,68,.15)' : 'rgba(59,130,246,.15)'};color:${onVacation ? 'var(--purple)' : emp.status === 'free' ? 'var(--green)' : emp.status === 'busy' ? 'var(--red)' : 'var(--blue)'}">
+        <span style="width:6px;height:6px;border-radius:50%;background:currentColor"></span> ${statusLabel}
+      </div>
+    </div>
+    ${actions}
+  `);
 }
 
 function showNewEmployeeModal() {
@@ -1203,6 +1292,50 @@ async function deleteEmployee(id) {
   invalidateCache(['employees', 'tasks', 'participants', 'allocations']);
   renderTeam();
   showToast('Funcionário removido.', 'info');
+}
+
+async function createEmployeeLogin(empId) {
+  const emp = await db.getEmployee(empId);
+  if (!emp) { showToast('Funcionário não encontrado no banco de dados.', 'error'); return; }
+  openModal('🔑 Criar Login: ' + emp.name + ' (' + emp.company_id + ')', `
+    <div style="font-size:.85rem;color:var(--text-muted);margin-bottom:.75rem">
+      Crie um email e senha para <strong>${emp.name}</strong> acessar o sistema.
+    </div>
+    <div class="form-group"><label>Email</label><input type="email" id="cl-email" placeholder="email@exemplo.com"></div>
+    <div class="form-group"><label>Senha</label><input type="password" id="cl-password" placeholder="mín. 4 caracteres"></div>
+    <div class="form-group"><label>Tipo</label>
+      <select id="cl-type">
+        <option value="funcionario">Funcionário</option>
+        <option value="gestor">Gestor</option>
+      </select>
+    </div>
+    <div class="login-error" id="cl-error" style="display:none;color:var(--red);font-size:.82rem;text-align:center"></div>
+    <div class="form-row">
+      <button class="btn btn-primary" onclick="saveEmployeeLogin(${empId})">Criar Login</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    </div>
+  `);
+}
+
+async function saveEmployeeLogin(empId) {
+  const email = document.getElementById('cl-email').value.trim();
+  const password = document.getElementById('cl-password').value.trim();
+  const type = document.getElementById('cl-type').value;
+  const errEl = document.getElementById('cl-error');
+  if (!email || !password) { errEl.textContent = 'Preencha email e senha.'; errEl.style.display = 'block'; return; }
+  if (password.length < 4) { errEl.textContent = 'Mínimo 4 caracteres.'; errEl.style.display = 'block'; return; }
+
+  const emp = await db.getEmployee(empId);
+  if (!emp) return;
+
+  errEl.textContent = 'Criando...';
+  errEl.style.display = 'block';
+
+  const result = await db.signupEmployee(email, password, emp.name, emp.company_id, emp.id, type);
+  if (result.error) { errEl.textContent = result.error; return; }
+
+  closeModal();
+  showToast('Login criado para ' + emp.name + '! Email: ' + email, 'success');
 }
 
 /* ============================================
@@ -2910,10 +3043,15 @@ function syncMapDateWithOverviewPeriod() {
 function openPhotoZoom(src) {
   openModal('', `
     <div style="display:flex;flex-direction:column;align-items:center;gap:.5rem;padding:1rem">
-      <img src="${src}" style="max-width:100%;max-height:80vh;border-radius:var(--radius-md);object-fit:contain;cursor:zoom-in" onclick="togglePhotoZoom(this)">
+      <img src="${src}" style="max-width:100%;max-height:80vh;border-radius:var(--radius-md);object-fit:contain;cursor:zoom-in" onclick="this.style.objectFit=this.style.objectFit==='contain'?'none':'contain';this.style.maxWidth=this.style.maxWidth==='100%'?'none':'100%'">
       <button class="btn btn-sm btn-secondary" onclick="closeModal()">Fechar</button>
     </div>
   `, { large: true, maxWidth: '800px' });
+}
+
+function togglePhotoZoom(img) {
+  img.style.objectFit = img.style.objectFit === 'contain' ? 'none' : 'contain';
+  img.style.maxWidth = img.style.maxWidth === '100%' ? 'none' : '100%';
 }
 
 /* ============================================
@@ -3218,8 +3356,13 @@ function setupEvents() {
     });
   });
 
-  document.getElementById('login-type').addEventListener('change', renderLoginProfiles);
   document.getElementById('btn-login').addEventListener('click', doLogin);
+  document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  // removed: type toggle (now gestor-only)
+  document.getElementById('btn-signup').addEventListener('click', doSignup);
+  document.getElementById('signup-password').addEventListener('keydown', e => { if (e.key === 'Enter') doSignup(); });
+  document.getElementById('link-show-signup').addEventListener('click', e => { e.preventDefault(); toggleLoginForm(true); });
+  document.getElementById('link-show-login').addEventListener('click', e => { e.preventDefault(); toggleLoginForm(false); });
   document.getElementById('btn-logout').addEventListener('click', doLogout);
 
   document.getElementById('notif-bell').addEventListener('click', e => {
@@ -3429,29 +3572,46 @@ function cleanupRealtime() {
 }
 
 /* ============================================
+   THEME TOGGLE
+   ============================================ */
+function updateThemeButtons(theme) {
+  const el = document.getElementById('btn-login-theme');
+  if (el) el.textContent = theme === 'dark' ? '🌙' : '☀️';
+  const el2 = document.getElementById('btn-theme-toggle');
+  if (el2) el2.textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+function toggleTheme() {
+  const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('ops-theme', theme);
+  updateThemeButtons(theme);
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem('ops-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  updateThemeButtons(saved);
+}
+
+/* ============================================
    INIT
    ============================================ */
 (async function init() {
+  loadTheme();
   setupEvents();
   setupSearch();
   setupToggleSidebar();
-  renderLoginProfiles();
 
-  // Fix: ensure the login screen has username/password fields
-  // These were non-functional before; I added them as a convenience
-  // but the login box already has the select-based login.
+  // Check if user has an active Supabase session (persists across tabs)
+  const hasSession = await checkExistingSession();
 
-  // Preload cache in background
-  try {
-    await loadCache();
-    await loadSectorsFromDB();
-    const recOpts = await getCachedRecurrenceOptions();
-    if (recOpts && recOpts.length > 0) {
-      App.state.recurrenceOptions = recOpts;
-    }
-  } catch (e) {
-    console.warn('Could not preload cache:', e);
+  if (hasSession) {
+    // Load sectors + recurrence (needed for rendering)
+    try {
+      await loadSectorsFromDB();
+      const recOpts = await getCachedRecurrenceOptions();
+      if (recOpts && recOpts.length > 0) App.state.recurrenceOptions = recOpts;
+    } catch (e) { /* background load fail */ }
   }
-
-  updateNotificationsBadge();
 })();

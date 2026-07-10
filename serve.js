@@ -18,12 +18,25 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
 http.createServer((req, res) => {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
+
   let url = req.url.split('?')[0];
   if (url === '/') url = '/index.html';
 
   const filePath = path.join(ROOT, url);
-  if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end(); return; }
+  if (!filePath.startsWith(ROOT)) { res.writeHead(403, CORS_HEADERS); res.end(); return; }
 
   const ext = path.extname(filePath);
   const contentType = MIME[ext] || 'application/octet-stream';
@@ -31,15 +44,25 @@ http.createServer((req, res) => {
   fs.readFile(filePath, (err, data) => {
     if (err) {
       if (err.code === 'ENOENT') {
-        res.writeHead(404);
+        // For SPA-like paths, serve index.html
+        if (!ext) {
+          const index = path.join(ROOT, 'index.html');
+          fs.readFile(index, (e2, d2) => {
+            if (e2) { res.writeHead(404, CORS_HEADERS); res.end('Not found'); return; }
+            res.writeHead(200, { 'Content-Type': 'text/html;charset=utf-8', ...CORS_HEADERS });
+            res.end(d2);
+          });
+          return;
+        }
+        res.writeHead(404, CORS_HEADERS);
         res.end('Not found');
       } else {
-        res.writeHead(500);
+        res.writeHead(500, CORS_HEADERS);
         res.end('Server error');
       }
       return;
     }
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, { 'Content-Type': contentType, ...CORS_HEADERS });
     res.end(data);
   });
 }).listen(PORT, '0.0.0.0', () => {
