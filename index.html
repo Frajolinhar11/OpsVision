@@ -98,9 +98,25 @@
           <span>Notificações</span>
           <span class="nav-badge" id="notif-nav-badge">0</span>
         </a>
+        <a href="#" data-page="operations" class="nav-item" id="nav-operations">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>Centro de Controle</span>
+        </a>
+        <a href="#" data-page="goals" class="nav-item" id="nav-goals">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+          <span>Metas e KPIs</span>
+        </a>
         <a href="#" data-page="map" class="nav-item" id="nav-map">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
           <span>Mapa Operacional</span>
+        </a>
+        <a href="#" data-page="docs" class="nav-item" id="nav-docs">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span>Documentos</span>
+        </a>
+        <a href="#" data-page="automation" class="nav-item" id="nav-automation">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="14.5 17.5 3 6 3 3 6 3 17.5 14.5"/><line x1="13" y1="19" x2="19" y2="13"/><line x1="16" y1="21" x2="21" y2="16"/><line x1="12" y1="9" x2="15" y2="12"/></svg>
+          <span>Automações</span>
         </a>
         <a href="#" data-page="settings" class="nav-item" id="nav-settings">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06A1.65 1.65 0 0019.32 9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
@@ -130,6 +146,7 @@
           <h2 class="page-title" id="page-title">Dashboard</h2>
         </div>
         <div class="topbar-right">
+          <button class="btn-toggle-sidebar" onclick="openOPSAI()" title="OPS AI" style="padding:.4rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:1rem">🤖</button>
           <button class="btn-toggle-sidebar" id="btn-theme-toggle" onclick="toggleTheme()" title="Alternar tema" style="padding:.4rem;border-radius:var(--radius-sm);color:var(--text-secondary);font-size:1rem">🌙</button>
           <div class="search-box">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -231,6 +248,7 @@
             <input type="text" id="filter-task-search" class="filter-input" placeholder="Buscar tarefa...">
             <input type="date" id="filter-task-date-start" class="filter-input" style="min-width:auto;width:140px" title="Data inicial">
             <input type="date" id="filter-task-date-end" class="filter-input" style="min-width:auto;width:140px" title="Data final">
+            <button class="btn btn-sm btn-secondary" onclick="printTasks()" title="Imprimir tarefas" style="white-space:nowrap">🖨️ Imprimir</button>
           </div>
           <div class="tasks-grid" id="tasks-grid"></div>
         </section>
@@ -242,7 +260,10 @@
               <h2>Equipe</h2>
               <p>Gerencie os membros da equipe</p>
             </div>
-            <button class="btn btn-primary" id="btn-new-employee">+ Novo Funcionário</button>
+            <div style="display:flex;gap:.5rem;align-items:center">
+              <button class="btn btn-primary" id="btn-new-employee">+ Novo Funcionário</button>
+              <button class="btn btn-sm btn-secondary" onclick="printTeam()">🖨️ Imprimir</button>
+            </div>
           </div>
           <div class="team-grid" id="team-grid"></div>
         </section>
@@ -315,6 +336,68 @@
         </section>
 
         <!-- CONFIGURAÇÕES -->
+        <section class="page" id="page-operations">
+          <div class="page-header">
+            <div><h2>Centro de Controle Operacional</h2><p>Visão em tempo real da operação</p></div>
+            <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+              <div class="period-selector" style="margin-bottom:0;padding:.4rem .6rem" id="ops-period-selector">
+                <button class="period-btn active" data-opsd="today">Hoje</button>
+                <button class="period-btn" data-opsd="yesterday">Ontem</button>
+                <button class="period-btn" data-opsd="week">Esta Semana</button>
+                <button class="period-btn" data-opsd="month">Este Mês</button>
+                <button class="period-btn" data-opsd="custom">Personalizar</button>
+                <div class="period-custom" id="ops-custom" style="display:inline-flex;margin-left:.25rem">
+                  <input type="date" id="ops-date-start">
+                  <span style="font-size:.75rem;color:var(--text-muted)">até</span>
+                  <input type="date" id="ops-date-end">
+                </div>
+              </div>
+              <span id="ops-timestamp" style="font-size:.78rem;color:var(--text-muted)"></span>
+              <button class="btn btn-sm btn-secondary" onclick="refreshOperations()">🔄 Atualizar</button>
+            </div>
+          </div>
+          <div id="operations-content"></div>
+        </section>
+        <section class="page" id="page-goals">
+          <div class="page-header">
+            <div>
+              <h2>Metas e KPIs</h2>
+              <p>Acompanhe indicadores de desempenho por empresa, setor e colaborador</p>
+            </div>
+            <button class="btn btn-primary" id="btn-new-goal">+ Nova Meta</button>
+          </div>
+          <div id="goals-content"></div>
+        </section>
+        <section class="page" id="page-docs">
+          <div class="page-header">
+            <div>
+              <h2>Documentos da Empresa</h2>
+              <p>Armazene e categorize contratos, procedimentos, normas e treinamentos</p>
+            </div>
+            <button class="btn btn-primary" id="btn-new-doc">+ Novo Documento</button>
+          </div>
+          <div class="filters-row" style="margin-bottom:.75rem">
+            <select id="filter-doc-category" class="filter-select" onchange="renderDocs()">
+              <option value="all">Todas as Categorias</option>
+              <option value="contrato">Contrato</option>
+              <option value="procedimento">Procedimento</option>
+              <option value="norma">Norma</option>
+              <option value="treinamento">Treinamento</option>
+              <option value="outros">Outros</option>
+            </select>
+          </div>
+          <div id="docs-content"></div>
+        </section>
+        <section class="page" id="page-automation">
+          <div class="page-header">
+            <div>
+              <h2>Automações</h2>
+              <p>Crie regras SE/ENTÃO para automatizar tarefas e notificações</p>
+            </div>
+            <button class="btn btn-primary" id="btn-new-rule">+ Nova Regra</button>
+          </div>
+          <div id="automation-content"></div>
+        </section>
         <section class="page" id="page-settings">
           <div class="page-header">
             <div>

@@ -79,6 +79,23 @@ async function getCachedSectors() {
 async function getCachedRecurrenceOptions() {
   return ensureCache('recurrenceOptions', db.getRecurrenceOptions);
 }
+async function getCachedTaskAssignees() {
+  return ensureCache('taskAssignees', db.getAllTaskAssignees);
+}
+
+async function assigneeNames(task) {
+  const emp = await getCachedEmployees();
+  const all = await getCachedTaskAssignees() || [];
+  const ids = all.filter(a => a.task_id === task.id).map(a => a.employee_id);
+  if (!ids.length && task.assignee) ids.push(task.assignee);
+  return ids.length ? ids.map(id => emp.find(e => e.id === id)?.name || '—').join(', ') : '—';
+}
+
+async function taskAssigneeIds(taskId) {
+  const all = await getCachedTaskAssignees() || [];
+  const ids = all.filter(a => a.task_id === taskId).map(a => a.employee_id);
+  return ids.length ? ids : null;
+}
 
 function isWorkingDay(schedules, employeeId, dateStr) {
   const s = schedules.find(s => s.employee_id === employeeId && s.start_date <= dateStr && s.end_date >= dateStr);
@@ -123,6 +140,63 @@ function nowBrasilTime() {
   return d.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
 }
 
+function addRecurrence(dateStr, recurrence) {
+  if (recurrence === 'none') return dateStr;
+  const d = new Date(dateStr + 'T12:00:00');
+  switch (recurrence) {
+    case 'daily': d.setDate(d.getDate() + 1); break;
+    case 'weekly': d.setDate(d.getDate() + 7); break;
+    case 'biweekly': d.setDate(d.getDate() + 14); break;
+    case 'monthly': d.setMonth(d.getMonth() + 1); break;
+    case 'quarterly': d.setMonth(d.getMonth() + 3); break;
+    case 'semiannual': d.setMonth(d.getMonth() + 6); break;
+    case 'yearly': d.setFullYear(d.getFullYear() + 1); break;
+    default: return dateStr;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+async function generateRecurringTasks() {
+  try {
+    const tasks = await getCachedTasks();
+    const today = todayBrasil();
+    const recurring = tasks.filter(t => t.recurrence && t.recurrence !== 'none');
+    if (!recurring.length) return;
+
+    let created = 0;
+    for (const task of recurring) {
+      // Walk forward from task date up to today; create today's instance if missing
+      let current = task.date;
+      while (current < today) {
+        const next = addRecurrence(current, task.recurrence);
+        if (next === current) break;
+        current = next;
+      }
+      // current is now >= today; only care about today
+      if (current !== today) continue;
+      const exists = tasks.some(t =>
+        t.title === task.title && t.assignee === task.assignee &&
+        t.date === current && t.id !== task.id
+      );
+      if (!exists) {
+        await db.insertTask({
+          id: uid(), title: task.title, description: task.description,
+          assignee: task.assignee, date: current, time: task.time,
+          recurrence: task.recurrence,
+          requires_evidence: task.requires_evidence,
+          requires_photo: task.requires_photo,
+          status: 'pending', evidence_photo: '', evidence_description: '',
+          evidence_timestamp: null, created_at: nowBrasilISO(),
+        });
+        created++;
+      }
+    }
+    if (created) {
+      invalidateCache('tasks');
+    }
+  } catch (e) { console.warn('generateRecurringTasks:', e); }
+}
+
 function formatTime(str) {
   if (!str) return '';
   const parts = str.split(':');
@@ -138,13 +212,35 @@ function getInitials(name) {
   return name.split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
 }
 
+const ROLES = {
+  proprietario: { level: 5, label: 'Proprietário', canManage: true, canConfig: true, canDelete: true },
+  gerente: { level: 4, label: 'Gerente', canManage: true, canConfig: true, canDelete: false },
+  gestor: { level: 4, label: 'Gestor', canManage: true, canConfig: true, canDelete: false },
+  supervisor: { level: 3, label: 'Supervisor', canManage: true, canConfig: false, canDelete: false },
+  funcionario: { level: 2, label: 'Funcionário', canManage: false, canConfig: false, canDelete: false },
+  auditor: { level: 1, label: 'Auditor', canManage: false, canConfig: false, canDelete: false },
+};
+
+function hasRole(minRole) {
+  const u = App.state.user;
+  if (!u) return false;
+  const role = ROLES[u.type] || ROLES.funcionario;
+  return role.level >= ROLES[minRole].level;
+}
+
 function isGestor() {
-  return App.state.user && App.state.user.type === 'gestor';
+  return App.state.user && hasRole('supervisor');
 }
 
 function isFuncionario() {
   return App.state.user && App.state.user.type === 'funcionario';
 }
+
+function getRoleLabel(type) {
+  return ROLES[type]?.label || type || 'Funcionário';
+}
+
+const ROLE_ORDER = ['funcionario', 'auditor', 'supervisor', 'gerente', 'proprietario'];
 
 function currentUserId() {
   return App.state.user ? App.state.user.id : null;
@@ -443,6 +539,12 @@ function openModal(title, bodyHTML, options = {}) {
   };
 }
 
+function showModal(title, html) {
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = html;
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
 function closeModal() {
   document.getElementById('modal-overlay').style.display = 'none';
   document.getElementById('modal-container').classList.remove('large');
@@ -521,6 +623,10 @@ function renderPage(page) {
       App.state.mapDate = getDateRange(App.state.mapOverviewPeriod || 'today').end;
       renderMap();
       break;
+    case 'goals': renderGoals(); break;
+    case 'docs': renderDocs(); break;
+    case 'automation': renderAutomation(); break;
+    case 'operations': renderOperations(); break;
     case 'settings':
       renderSettings();
       break;
@@ -573,11 +679,6 @@ async function doSignup() {
   if (loggedIn) {
     App.state.user = loggedIn;
     afterLogin();
-    if (loggedIn.company_code) {
-      setTimeout(() => {
-        alert('📌 Código da sua empresa: ' + loggedIn.company_code + '\nCompartilhe com seus funcionários para eles se cadastrarem.');
-      }, 1000);
-    }
     return;
   }
 
@@ -624,17 +725,13 @@ async function ensureEmployeeRecord() {
   try {
     const u = App.state.user;
     if (!u || !u.company_id) return;
-    // Check if employee exists using raw query (bypass db._companyId)
-    const { data: emps } = await sb.from('employees').select('id').eq('company_id', u.company_id).eq('id', u.id).limit(1);
-    if (emps && emps[0]) return;
-    // Create employee record directly
-    await sb.from('employees').insert({
+    await sb.from('employees').upsert({
       id: u.id,
       company_id: u.company_id,
       name: u.name,
       role: u.type === 'gestor' ? 'Gestor' : 'Funcionário',
       status: 'free',
-    });
+    }, { onConflict: 'id' });
   } catch (e) { console.warn('ensureEmployeeRecord:', e); }
 }
 
@@ -642,18 +739,25 @@ function afterLogin() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
 
-  const isGestorUser = isGestor();
-  document.getElementById('btn-new-task').style.display = isGestorUser ? 'inline-flex' : 'none';
-  document.getElementById('btn-new-employee').style.display = isGestorUser ? 'inline-flex' : 'none';
-  document.getElementById('btn-new-meeting').style.display = isGestorUser ? 'inline-flex' : 'none';
+  const isAdmin = hasRole('supervisor');
+  document.getElementById('btn-new-task').style.display = isAdmin ? 'inline-flex' : 'none';
+  document.getElementById('btn-new-employee').style.display = isAdmin ? 'inline-flex' : 'none';
+  document.getElementById('btn-new-meeting').style.display = isAdmin ? 'inline-flex' : 'none';
 
-  if (isFuncionario()) {
+  if (App.state.user.type === 'funcionario') {
     document.getElementById('page-team').classList.add('funcionario-view');
     document.getElementById('page-tasks').classList.add('funcionario-view');
+  } else {
+    document.getElementById('page-team').classList.remove('funcionario-view');
+    document.getElementById('page-tasks').classList.remove('funcionario-view');
   }
 
-  // Hide gestor-only nav items for funcionários
-  document.getElementById('nav-settings').style.display = isGestorUser ? '' : 'none';
+  // Nav visibility based on role
+  const canConfig = hasRole('gerente');
+  document.getElementById('nav-settings').style.display = canConfig ? '' : 'none';
+  document.getElementById('nav-goals').style.display = isAdmin ? '' : 'none';
+  document.getElementById('nav-docs').style.display = canConfig ? '' : 'none';
+  document.getElementById('nav-automation').style.display = canConfig ? '' : 'none';
 
   updateUserUI();
   navigateTo('dashboard');
@@ -667,6 +771,12 @@ function afterLogin() {
     Notification.requestPermission();
   }
 
+  // Generate recurring task instances
+  generateRecurringTasks();
+
+  // Show onboarding wizard for new companies
+  checkOnboarding();
+
   // Start real-time subscriptions
   setupRealtime();
 }
@@ -677,10 +787,10 @@ function updateUserUI() {
   const initial = u.initials || u.name[0];
   document.getElementById('sidebar-avatar').textContent = initial;
   document.getElementById('sidebar-name').textContent = u.name;
-  document.getElementById('sidebar-role').textContent = u.role;
+  document.getElementById('sidebar-role').textContent = getRoleLabel(u.type);
   document.getElementById('topbar-avatar').textContent = initial;
   document.getElementById('topbar-name').textContent = u.name;
-  document.getElementById('topbar-role').textContent = u.role;
+  document.getElementById('topbar-role').textContent = getRoleLabel(u.type);
 }
 
 async function doLogout() {
@@ -717,6 +827,16 @@ async function updateNotificationsBadge() {
   document.getElementById('notif-nav-badge').textContent = unread;
   document.getElementById('notif-badge').style.display = unread > 0 ? 'inline' : 'none';
   document.getElementById('notif-nav-badge').style.display = unread > 0 ? 'inline' : 'none';
+}
+
+async function auditLog(action, entityType, entityId, description, beforeData, afterData) {
+  try {
+    await db.insertAuditLog({
+      user_id: App.state.user?.id,
+      action, entity_type: entityType, entity_id: entityId,
+      description, before_data: beforeData || null, after_data: afterData || null,
+    });
+  } catch (e) {}
 }
 
 async function renderNotifDropdown() {
@@ -1116,6 +1236,7 @@ async function renderTeam() {
   const grid = document.getElementById('team-grid');
   const employees = await getCachedEmployees();
   const schedules = await getCachedSchedules();
+  const allocations = await getCachedAllocations();
   const today = todayBrasil();
 
   if (!employees.length) {
@@ -1123,18 +1244,17 @@ async function renderTeam() {
     return;
   }
 
+  const todayAllocs = allocations.filter(a => (a.allocated_at || '').startsWith(today));
+
   grid.innerHTML = employees.map(emp => {
     const onVacation = schedules.some(s => s.employee_id === emp.id && s.start_date <= today && s.end_date >= today && s.type === 'vacation');
-    const statusLabel = onVacation ? 'Ferias' : emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa';
+    const areaAlloc = todayAllocs.find(a => a.employee_id === emp.id);
     return `
     <div class="employee-card" onclick="showEmployeeCard(${emp.id})">
       <div class="emp-avatar" style="background:${randomColor(emp.name)}">${getInitials(emp.name)}</div>
       <div class="emp-name">${emp.name}</div>
       <div class="emp-role">${emp.role}</div>
-      <div class="emp-status ${onVacation ? 'vacation' : emp.status}">
-        <span style="width:6px;height:6px;border-radius:50%;background:currentColor"></span>
-        ${statusLabel}
-      </div>
+      ${areaAlloc ? `<div style="font-size:.72rem;color:var(--text-muted);margin-top:2px">📍 ${areaAlloc.area}</div>` : ''}
     </div>
   `}).join('');
 }
@@ -1143,27 +1263,89 @@ async function showEmployeeCard(empId) {
   const employees = await getCachedEmployees();
   const emp = employees.find(e => e.id === empId);
   if (!emp) return;
-  const schedules = await getCachedSchedules();
+  const [tasks, feedbacks, docs] = await Promise.all([
+    getCachedTasks(),
+    db.getFeedbacks(empId).catch(() => []),
+    db.getEmployeeDocs(empId).catch(() => []),
+  ]);
   const today = todayBrasil();
-  const onVacation = schedules.some(s => s.employee_id === emp.id && s.start_date <= today && s.end_date >= today && s.type === 'vacation');
-  const statusLabel = onVacation ? 'Ferias' : emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa';
-  const actions = isGestor() ? `
-    <div class="form-row" style="margin-top:1.25rem;flex-wrap:wrap;gap:.5rem">
-      <button class="btn btn-primary" onclick="closeModal();createEmployeeLogin(${emp.id})">🔑 Criar Login</button>
-      <button class="btn btn-secondary" onclick="closeModal();showEmployeeTasks(${emp.id})">📋 Tarefas</button>
-      <button class="btn btn-secondary" onclick="closeModal();editEmployee(${emp.id})">Editar</button>
-      <button class="btn btn-danger" onclick="closeModal();deleteEmployee(${emp.id})">Remover</button>
-    </div>` : '';
+  const empTasks = tasks.filter(t => t.assignee === empId);
+  const completed = empTasks.filter(t => t.status === 'completed');
+  const completionRate = empTasks.length ? Math.round(completed.length / empTasks.length * 100) : 0;
+
   openModal(emp.name, `
-    <div style="text-align:center;margin-bottom:1rem">
-      <div class="emp-avatar" style="background:${randomColor(emp.name)};width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:700;margin:0 auto .75rem">${getInitials(emp.name)}</div>
-      <div style="font-size:.82rem;color:var(--text-secondary)">${emp.role}</div>
-      <div style="margin-top:.5rem;display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:20px;font-size:.75rem;font-weight:500;background:${onVacation ? 'rgba(139,92,246,.15)' : emp.status === 'free' ? 'rgba(16,185,129,.15)' : emp.status === 'busy' ? 'rgba(239,68,68,.15)' : 'rgba(59,130,246,.15)'};color:${onVacation ? 'var(--purple)' : emp.status === 'free' ? 'var(--green)' : emp.status === 'busy' ? 'var(--red)' : 'var(--blue)'}">
-        <span style="width:6px;height:6px;border-radius:50%;background:currentColor"></span> ${statusLabel}
-      </div>
+    <div class="emp-dossier-tabs">
+      <button class="emp-dossier-tab active" onclick="switchDossierTab(this,'dados')">📋 Dados</button>
+      <button class="emp-dossier-tab" onclick="switchDossierTab(this,'historico')">📊 Histórico</button>
+      <button class="emp-dossier-tab" onclick="switchDossierTab(this,'feedbacks')">💬 Feedbacks</button>
+      <button class="emp-dossier-tab" onclick="switchDossierTab(this,'docs')">📄 Documentos</button>
     </div>
-    ${actions}
-  `);
+    <div id="dossier-dados" class="dossier-section">
+      <div style="text-align:center;margin-bottom:1rem">
+        <div class="emp-avatar" style="background:${randomColor(emp.name)};width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:700;margin:0 auto .75rem">${getInitials(emp.name)}</div>
+        <div style="font-size:.82rem;color:var(--text-secondary)">${emp.role}</div>
+        <div style="margin-top:.5rem;display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:20px;font-size:.75rem;font-weight:500;background:${emp.status === 'free' ? 'rgba(16,185,129,.15)' : emp.status === 'busy' ? 'rgba(239,68,68,.15)' : 'rgba(59,130,246,.15)'};color:${emp.status === 'free' ? 'var(--green)' : emp.status === 'busy' ? 'var(--red)' : 'var(--blue)'}">${emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa'}</div>
+      </div>
+      <div class="dossier-stats">
+        <div class="dossier-stat"><span class="ds-val">${completionRate}%</span><span class="ds-lbl">Conclusão</span></div>
+        <div class="dossier-stat"><span class="ds-val">${empTasks.length}</span><span class="ds-lbl">Tarefas</span></div>
+        <div class="dossier-stat"><span class="ds-val">${completed.length}</span><span class="ds-lbl">Concluídas</span></div>
+      </div>
+      ${isGestor() ? `
+      <div class="form-row" style="margin-top:1.25rem;flex-wrap:wrap;gap:.5rem">
+        <button class="btn btn-sm btn-primary" onclick="closeModal();createEmployeeLogin(${emp.id})">🔑 Criar Login</button>
+        <button class="btn btn-sm btn-secondary" onclick="closeModal();showEmployeeTasks(${emp.id})">📋 Tarefas</button>
+        <button class="btn btn-sm btn-secondary" onclick="closeModal();editEmployee(${emp.id})">Editar</button>
+        <button class="btn btn-sm btn-danger" onclick="closeModal();deleteEmployee(${emp.id})">Remover</button>
+      </div>` : ''}
+    </div>
+    <div id="dossier-historico" class="dossier-section" style="display:none">
+      <div style="margin-bottom:.75rem;font-size:.88rem;color:var(--text-secondary)">Últimas tarefas realizadas</div>
+      ${empTasks.length ? empTasks.slice(0, 15).map(t => `<div class="ops-task-row" onclick="closeModal();showTaskDetail(${t.id})" style="cursor:pointer"><span>${t.status === 'completed' ? '✅' : t.date < today ? '🔴' : '⏳'}</span><span class="ops-task-title">${t.title}</span><span style="font-size:.72rem;color:var(--text-muted)">${formatDate(t.date)}</span></div>`).join('') : '<div style="color:var(--text-muted);text-align:center;padding:1rem">Nenhuma tarefa encontrada</div>'}
+    </div>
+    <div id="dossier-feedbacks" class="dossier-section" style="display:none">
+      ${isGestor() ? `<button class="btn btn-sm btn-primary" onclick="addFeedback(${emp.id})" style="margin-bottom:.75rem">➕ Adicionar Feedback</button>` : ''}
+      ${feedbacks.length ? feedbacks.map(f => `<div class="ops-feedback-item"><div style="display:flex;justify-content:space-between"><strong>${'★'.repeat(f.rating)}${'☆'.repeat(5-(f.rating||0))}</strong><span style="font-size:.72rem;color:var(--text-muted)">${new Date(f.created_at).toLocaleDateString('pt-BR')}</span></div><div style="font-size:.85rem;margin-top:.25rem">${f.text}</div></div>`).join('') : '<div style="color:var(--text-muted);text-align:center;padding:1rem">Nenhum feedback ainda</div>'}
+    </div>
+    <div id="dossier-docs" class="dossier-section" style="display:none">
+      ${isGestor() ? `<button class="btn btn-sm btn-primary" onclick="addEmployeeDoc(${emp.id})" style="margin-bottom:.75rem">➕ Adicionar Documento</button>` : ''}
+      ${docs.length ? docs.map(d => `<div class="ops-doc-row"><span>📄 ${d.name}</span><button class="btn btn-sm btn-ghost" onclick="deleteEmployeeDoc('${d.id}')">🗑️</button></div>`).join('') : '<div style="color:var(--text-muted);text-align:center;padding:1rem">Nenhum documento</div>'}
+    </div>
+  `, { large: true, maxWidth: '600px' });
+}
+
+function switchDossierTab(btn, tab) {
+  document.querySelectorAll('.emp-dossier-tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.dossier-section').forEach(s => s.style.display = 'none');
+  document.getElementById('dossier-' + tab).style.display = 'block';
+}
+
+async function addFeedback(empId) {
+  const text = prompt('Escreva o feedback:');
+  if (!text) return;
+  const rating = prompt('Nota (1-5):');
+  if (!rating || rating < 1 || rating > 5) { showToast('Nota deve ser entre 1 e 5', 'error'); return; }
+  await db.insertFeedback({ employee_id: empId, author_id: App.state.user.id, text, rating: parseInt(rating) });
+  showToast('Feedback adicionado!', 'success');
+  showEmployeeCard(empId);
+}
+
+async function addEmployeeDoc(empId) {
+  const name = prompt('Nome do documento:');
+  if (!name) return;
+  const url = prompt('URL do arquivo:');
+  if (!url) return;
+  await db.insertEmployeeDoc({ employee_id: empId, name, file_url: url });
+  showToast('Documento adicionado!', 'success');
+  showEmployeeCard(empId);
+}
+
+async function deleteEmployeeDoc(id) {
+  if (!confirm('Remover documento?')) return;
+  await db.deleteEmployeeDoc(id);
+  showToast('Documento removido.', 'info');
+  // Re-show current employee card
 }
 
 function showNewEmployeeModal() {
@@ -1171,6 +1353,14 @@ function showNewEmployeeModal() {
   openModal('Novo Funcionário', `
     <div class="form-group"><label>Nome</label><input type="text" id="emp-name" placeholder="Nome completo"></div>
     <div class="form-group"><label>Cargo</label><input type="text" id="emp-role" placeholder="Cargo/função"></div>
+    <div class="form-group"><label>Nível de Acesso</label>
+      <select id="emp-type">
+        <option value="funcionario">Funcionário</option>
+        <option value="supervisor">Supervisor</option>
+        <option value="gerente">Gerente</option>
+        <option value="auditor">Auditor</option>
+      </select>
+    </div>
     <div class="form-group"><label>Status</label>
       <select id="emp-status">
         <option value="free">Livre</option>
@@ -1297,16 +1487,19 @@ async function deleteEmployee(id) {
 async function createEmployeeLogin(empId) {
   const emp = await db.getEmployee(empId);
   if (!emp) { showToast('Funcionário não encontrado no banco de dados.', 'error'); return; }
-  openModal('🔑 Criar Login: ' + emp.name + ' (' + emp.company_id + ')', `
+  openModal('🔑 Criar Login: ' + emp.name, `
     <div style="font-size:.85rem;color:var(--text-muted);margin-bottom:.75rem">
       Crie um email e senha para <strong>${emp.name}</strong> acessar o sistema.
     </div>
     <div class="form-group"><label>Email</label><input type="email" id="cl-email" placeholder="email@exemplo.com"></div>
     <div class="form-group"><label>Senha</label><input type="password" id="cl-password" placeholder="mín. 4 caracteres"></div>
-    <div class="form-group"><label>Tipo</label>
+    <div class="form-group"><label>Nível de Acesso</label>
       <select id="cl-type">
         <option value="funcionario">Funcionário</option>
-        <option value="gestor">Gestor</option>
+        <option value="auditor">Auditor</option>
+        <option value="supervisor">Supervisor</option>
+        <option value="gerente">Gerente</option>
+        <option value="proprietario">Proprietário</option>
       </select>
     </div>
     <div class="login-error" id="cl-error" style="display:none;color:var(--red);font-size:.82rem;text-align:center"></div>
@@ -1344,9 +1537,16 @@ async function saveEmployeeLogin(empId) {
 async function renderTasks() {
   const grid = document.getElementById('tasks-grid');
   let tasks = await getCachedTasks();
+  const taskAssignees = await getCachedTaskAssignees() || [];
+  const assigneeMap = {};
+  for (const ta of taskAssignees) {
+    if (!assigneeMap[ta.task_id]) assigneeMap[ta.task_id] = [];
+    assigneeMap[ta.task_id].push(ta.employee_id);
+  }
+  const userId = currentUserId();
 
   if (isFuncionario()) {
-    tasks = tasks.filter(t => t.assignee === currentUserId());
+    tasks = tasks.filter(t => t.assignee === userId || (assigneeMap[t.id] && assigneeMap[t.id].includes(userId)));
   }
 
   const filterStatus = document.getElementById('filter-task-status').value;
@@ -1354,7 +1554,10 @@ async function renderTasks() {
   const filterSearch = document.getElementById('filter-task-search').value.toLowerCase();
 
   if (filterStatus !== 'all') tasks = tasks.filter(t => t.status === filterStatus);
-  if (filterEmployee !== 'all') tasks = tasks.filter(t => t.assignee === parseInt(filterEmployee));
+  if (filterEmployee !== 'all') tasks = tasks.filter(t => {
+    const fe = parseInt(filterEmployee);
+    return t.assignee === fe || (assigneeMap[t.id] && assigneeMap[t.id].includes(fe));
+  });
   if (filterSearch) tasks = tasks.filter(t => t.title.toLowerCase().includes(filterSearch));
   const dateStartInput = document.getElementById('filter-task-date-start');
   const dateEndInput = document.getElementById('filter-task-date-end');
@@ -1382,7 +1585,8 @@ async function renderTasks() {
   }
 
   grid.innerHTML = tasks.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)).map(t => {
-    const emp = employees.find(e => e.id === t.assignee);
+    const aIds = assigneeMap[t.id] || (t.assignee ? [t.assignee] : []);
+    const names = aIds.map(id => employees.find(e => e.id === id)?.name || '—').join(', ');
     const overdue = t.status !== 'completed' && t.date < todayBrasil();
     const isCompleted = t.status === 'completed';
     const statusColor = overdue ? 'var(--red)' : isCompleted ? 'var(--green)' : t.status === 'in_progress' ? 'var(--blue)' : 'var(--amber)';
@@ -1396,7 +1600,7 @@ async function renderTasks() {
       </div>
       <div class="task-card-body">
         <div class="task-meta-row">
-          <span class="task-meta-item person"><span class="meta-icon">👤</span> <strong class="task-person-name">${emp ? emp.name : '—'}</strong></span>
+          <span class="task-meta-item person"><span class="meta-icon">👤</span> <strong class="task-person-name">${names}</strong></span>
           <span class="task-meta-item date"><span class="meta-icon">📅</span> <strong class="task-person-name">${formatDate(t.date)}</strong> <span class="meta-time">${formatTime(t.time)}</span></span>
           ${t.requires_evidence ? '<span class="task-meta-item evidence">📷 Com foto</span>' : ''}
         </div>
@@ -1419,8 +1623,10 @@ function showNewTaskModal() {
     openModal('Nova Tarefa', `
       <div class="form-group"><label>Título</label><input type="text" id="task-title" placeholder="Título da tarefa"></div>
       <div class="form-group"><label>Descrição</label><textarea id="task-desc" placeholder="Descrição detalhada"></textarea></div>
-      <div class="form-group"><label>Responsável</label>
-        <select id="task-assignee"><option value="">Selecione...</option>${workingEmployees.map(e => `<option value="${e.id}">${e.name}</option>`).join('')}</select>
+      <div class="form-group"><label>Responsáveis (selecione um ou mais)</label>
+        <div style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem;background:var(--bg-card)">
+          ${workingEmployees.map(e => `<label style="display:flex;align-items:center;gap:.5rem;padding:.25rem .35rem;cursor:pointer;border-radius:4px;font-size:.85rem"><input type="checkbox" class="task-assignee-cb" value="${e.id}" checked> ${e.name}</label>`).join('')}
+        </div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Data</label><input type="date" id="task-date"></div>
@@ -1443,34 +1649,44 @@ function showNewTaskModal() {
   });
 }
 
+function getSelectedAssignees(prefix) {
+  const cbs = document.querySelectorAll((prefix || '') + '.task-assignee-cb:checked');
+  return Array.from(cbs).map(cb => parseInt(cb.value)).filter(v => v);
+}
+
 async function saveNewTask() {
   const title = document.getElementById('task-title').value.trim();
   const description = document.getElementById('task-desc').value.trim();
-  const assignee = parseInt(document.getElementById('task-assignee').value);
+  const assignees = getSelectedAssignees('#');
   const date = document.getElementById('task-date').value;
   const time = document.getElementById('task-time').value;
   const recurrence = document.getElementById('task-recurrence').value;
   const requiresEvidence = document.getElementById('task-evidence').checked;
   const requiresPhoto = document.getElementById('task-photo').checked;
 
-  if (!title || !assignee || !date) { showToast('Preencha título, responsável e data', 'error'); return; }
+  if (!title || !assignees.length || !date) { showToast('Preencha título, responsável(is) e data', 'error'); return; }
 
   const task = {
-    id: uid(), title, description, assignee, date, time, recurrence,
+    id: uid(), title, description, assignee: assignees[0], date, time, recurrence,
     requires_evidence: requiresEvidence, requires_photo: requiresPhoto,
     status: 'pending', evidence_photo: '', evidence_description: '', evidence_timestamp: null,
     created_at: nowBrasilISO(),
   };
 
   await db.insertTask(task);
-  invalidateCache('tasks');
+  for (const eid of assignees) {
+    await db.insertTaskAssignee({ task_id: task.id, employee_id: eid });
+  }
+  invalidateCache(['tasks', 'taskAssignees']);
 
   const employees = await getCachedEmployees();
-  showNotificationPopup(`📋 Nova tarefa: <strong>${title}</strong> para ${getEmployeeName(assignee, employees)}`, 'task');
-  addNotification(`Nova tarefa <strong>${title}</strong> atribuída a ${getEmployeeName(assignee, employees)}.`, 'task', task.id);
+  const names = assignees.map(id => getEmployeeName(id, employees)).join(', ');
+  showNotificationPopup(`📋 Nova tarefa: <strong>${title}</strong> para ${names}`, 'task');
+  addNotification(`Nova tarefa <strong>${title}</strong> atribuída a ${names}.`, 'task', task.id);
   closeModal();
   renderTasks();
   showToast('Tarefa criada com sucesso!', 'success');
+  runTriggerEngine('task_created', { taskId: task.id, title, assignee: assignees[0], sector: null });
 }
 
 async function editTask(id) {
@@ -1479,11 +1695,16 @@ async function editTask(id) {
   const [employees, schedules] = await Promise.all([getCachedEmployees(), getCachedSchedules()]);
   const today = todayBrasil();
   const workingEmployees = employees.filter(e => isWorkingDay(schedules, e.id, today));
+  const currentAssignees = await db.getTaskAssignees(id);
+  const currentIds = currentAssignees.map(a => a.employee_id);
+  if (!currentIds.length && t.assignee) currentIds.push(t.assignee);
   openModal('Editar Tarefa', `
     <div class="form-group"><label>Título</label><input type="text" id="task-title-edit" value="${t.title}"></div>
     <div class="form-group"><label>Descrição</label><textarea id="task-desc-edit">${t.description || ''}</textarea></div>
-    <div class="form-group"><label>Responsável</label>
-      <select id="task-assignee-edit">${workingEmployees.map(e => `<option value="${e.id}" ${e.id === t.assignee ? 'selected' : ''}>${e.name}</option>`).join('')}</select>
+    <div class="form-group"><label>Responsáveis</label>
+      <div style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem;background:var(--bg-card)">
+        ${workingEmployees.map(e => `<label style="display:flex;align-items:center;gap:.5rem;padding:.25rem .35rem;cursor:pointer;border-radius:4px;font-size:.85rem"><input type="checkbox" class="task-assignee-cb-edit" value="${e.id}" ${currentIds.includes(e.id) ? 'checked' : ''}> ${e.name}</label>`).join('')}
+      </div>
     </div>
     <div class="form-row">
       <div class="form-group"><label>Data</label><input type="date" id="task-date-edit" value="${t.date}"></div>
@@ -1509,17 +1730,24 @@ async function saveEditTask(id) {
   const title = document.getElementById('task-title-edit').value.trim();
   if (!title) { showToast('O título é obrigatório', 'error'); return; }
 
+  const assigneeCbs = document.querySelectorAll('.task-assignee-cb-edit:checked');
+  const assignees = Array.from(assigneeCbs).map(cb => parseInt(cb.value)).filter(v => v);
+
   await db.updateTask(id, {
     title,
     description: document.getElementById('task-desc-edit').value.trim(),
-    assignee: parseInt(document.getElementById('task-assignee-edit').value),
+    assignee: assignees.length ? assignees[0] : t.assignee,
     date: document.getElementById('task-date-edit').value,
     time: document.getElementById('task-time-edit').value,
     recurrence: document.getElementById('task-recurrence-edit').value,
     requires_evidence: document.getElementById('task-evidence-edit').checked,
     requires_photo: document.getElementById('task-photo-edit').checked,
   });
-  invalidateCache('tasks');
+  await db.deleteTaskAssignees(id);
+  for (const eid of assignees) {
+    await db.insertTaskAssignee({ task_id: id, employee_id: eid });
+  }
+  invalidateCache(['tasks', 'taskAssignees']);
   closeModal();
   renderTasks();
   showToast('Tarefa atualizada!', 'success');
@@ -1536,7 +1764,8 @@ async function deleteTask(id) {
 async function showTaskDetail(id) {
   const [t, employees] = await Promise.all([db.getTask(id), getCachedEmployees()]);
   if (!t) return;
-  const emp = employees.find(e => e.id === t.assignee);
+  const aIds = (await taskAssigneeIds(id)) || (t.assignee ? [t.assignee] : []);
+  const names = aIds.map(eid => employees.find(e => e.id === eid)?.name || '—').join(', ');
   const overdue = t.status !== 'completed' && t.date < todayBrasil();
 
   const statusIcon = { pending: '⏳', in_progress: '🔄', completed: '✅' };
@@ -1563,16 +1792,17 @@ async function showTaskDetail(id) {
         ${overdue ? '⚠️ ATRASADA' : statusIcon[t.status]} ${statusClass[t.status]}
       </div>
       <div class="detail-grid">
-        <div class="detail-section"><h4>👤 Responsavel</h4><p>${emp ? emp.name + ' — ' + emp.role : '—'}</p></div>
+        <div class="detail-section"><h4>👤 Responsaveis</h4><p>${names}</p></div>
         <div class="detail-section"><h4>📅 Data</h4><p>${formatDate(t.date)} as ${formatTime(t.time)}</p></div>
         <div class="detail-section"><h4>Recorrencia</h4><p>${t.recurrence === 'none' ? 'Sem recorrencia' : recurrenceLabel(t.recurrence)}</p></div>
         <div class="detail-section"><h4>📸 Comprovacao</h4><p>${t.requires_evidence ? 'Exige comprovacao' : 'Nao exige'} ${t.requires_photo ? '📷 + foto' : ''}</p></div>
       </div>
       ${t.description ? `<div class="detail-section"><h4>📝 Descricao</h4><p>${t.description}</p></div>` : ''}
       ${evidenceHtml}
-      <div class="detail-section"><h4>Informacoes</h4><p>Criada em: ${formatDateTime(t.created_at)}</p><p>ID da tarefa: #${t.id}</p></div>
+      <div class="detail-section"><h4>Informacoes</h4><p>Criada em: ${formatDateTime(t.created_at)}</p></div>
       <div class="form-row" style="margin-top:1rem">
         ${t.status !== 'completed' ? `<button class="btn btn-${t.requires_evidence ? 'warning' : 'success'}" onclick="closeModal();executeTask(${t.id})">${t.requires_evidence ? 'Enviar Comprovacao' : 'Executar'}</button>` : ''}
+        ${t.status === 'completed' && isGestor() ? `<button class="btn btn-sm btn-secondary" onclick="closeModal();rateTask(${t.id})">⭐ Avaliar</button>` : ''}
         ${isGestor() ? `<button class="btn btn-secondary" onclick="closeModal();editTask(${t.id})">Editar</button>
         <button class="btn btn-danger" onclick="if(confirm('Excluir?')){closeModal();deleteTask(${t.id})}">Excluir</button>` : ''}
         <button class="btn btn-secondary" onclick="closeModal()">Fechar</button>
@@ -1595,18 +1825,23 @@ async function executeTask(id) {
   invalidateCache('tasks');
 
   const employees = await getCachedEmployees();
-  showNotificationPopup(`✅ <strong>${t.title}</strong> concluida por ${getEmployeeName(t.assignee, employees)}.`, 'task');
-  addNotification(`<strong>${t.title}</strong> foi concluída por ${getEmployeeName(t.assignee, employees)}.`, 'task', id);
+  const executor = employees.find(e => e.user_id === currentUserId()) || employees.find(e => e.id === t.assignee);
+  const executorName = executor ? executor.name : '—';
+  showNotificationPopup(`✅ <strong>${t.title}</strong> concluida por ${executorName}.`, 'task');
+  addNotification(`<strong>${t.title}</strong> foi concluída por ${executorName}.`, 'task', id);
   renderTasks();
   showToast('Tarefa concluída!', 'success');
+  runTriggerEngine('task_completed', { taskId: id, title: t.title, assignee: t.assignee });
 }
 
 function showEvidenceModal(t) {
-  getCachedEmployees().then(employees => {
-    const emp = employees.find(e => e.id === t.assignee);
+  Promise.all([getCachedEmployees(), getCachedTaskAssignees()]).then(([employees, taskAssignees]) => {
+    const aIds = (taskAssignees || []).filter(a => a.task_id === t.id).map(a => a.employee_id);
+    if (!aIds.length && t.assignee) aIds.push(t.assignee);
+    const names = aIds.map(eid => employees.find(e => e.id === eid)?.name || '—').join(', ');
     openModal('Executar Tarefa: ' + t.title, `
       <div style="margin-bottom:.5rem;font-size:.88rem;color:var(--text-secondary)">${t.description || ''}</div>
-      <div style="margin-bottom:1rem;font-size:.82rem;color:var(--text-muted)">Responsável: ${emp ? emp.name : '—'} | Data: ${formatDate(t.date)}</div>
+      <div style="margin-bottom:1rem;font-size:.82rem;color:var(--text-muted)">Responsáveis: ${names} | Data: ${formatDate(t.date)}</div>
       ${t.requires_photo ? '<div style="margin-bottom:.75rem;padding:.5rem;background:rgba(245,158,11,.1);border-radius:var(--radius-sm);font-size:.85rem;color:var(--amber)">Esta tarefa exige upload de foto para conclusao.</div>' : ''}
       <div class="form-group"><label>Observação (opcional)</label><textarea id="evidence-desc" placeholder="Descreva a execução..."></textarea></div>
       <div class="form-group">
@@ -3038,6 +3273,872 @@ function syncMapDateWithOverviewPeriod() {
 }
 
 /* ============================================
+   CENTRO DE CONTROLE OPERACIONAL
+   ============================================ */
+async function renderOperations() {
+  const content = document.getElementById('operations-content');
+  content.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Carregando...</div>`;
+  document.getElementById('ops-timestamp').textContent = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+
+  // Setup period filter events
+  const sel = document.getElementById('ops-period-selector');
+  if (sel) {
+    sel.querySelectorAll('[data-opsd]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        sel.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const k = btn.dataset.opsd;
+        document.getElementById('ops-custom').classList.toggle('show', k === 'custom');
+        refreshOperations();
+      });
+    });
+    document.getElementById('ops-date-start')?.addEventListener('change', refreshOperations);
+    document.getElementById('ops-date-end')?.addEventListener('change', refreshOperations);
+  }
+
+  await refreshOperations();
+}
+
+function getOpsDateRange() {
+  const active = document.querySelector('#ops-period-selector .period-btn.active');
+  const key = active ? active.dataset.opsd : 'today';
+  if (key === 'custom') {
+    const s = document.getElementById('ops-date-start')?.value;
+    const e = document.getElementById('ops-date-end')?.value;
+    return { start: s || todayBrasil(), end: e || todayBrasil(), key };
+  }
+  const range = getDateRange(key);
+  return { start: range.start, end: range.end, key };
+}
+
+async function refreshOperations() {
+  const content = document.getElementById('operations-content');
+  const [employees, tasks, sectors, allocations] = await Promise.all([
+    getCachedEmployees(),
+    getCachedTasks(),
+    db.getSectors(),
+    getCachedAllocations(),
+  ]);
+
+  const today = todayBrasil();
+  const { start, end } = getOpsDateRange();
+  const isToday = start === today && end === today;
+  const periodTasks = tasks.filter(t => t.date >= start && t.date <= end);
+  const overdue = periodTasks.filter(t => t.status !== 'completed' && t.date < today);
+  const completedPeriod = periodTasks.filter(t => t.status === 'completed');
+  const pendingPeriod = periodTasks.filter(t => t.status !== 'completed' && t.date >= start);
+
+  const areaProd = (sectors || []).map(s => {
+    const st = tasks.filter(t => allocations.some(a => a.area === s.name && a.employee_id === t.assignee));
+    return { name: s.name, icon: s.icon, total: st.length, done: st.filter(t => t.status === 'completed').length, goal: s.goal || 0 };
+  });
+
+  const rangeLabel = start === end ? formatDate(start) : formatDate(start) + ' — ' + formatDate(end);
+  const futureTasks = tasks.filter(t => t.status !== 'completed' && t.date >= today).slice(0, 10);
+
+  content.innerHTML = `
+    <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:.75rem">${rangeLabel}</div>
+    <div class="ops-metrics-grid">
+      <div class="ops-card ${overdue.length ? 'red' : 'green'}">
+        <svg class="ops-card-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12"/><line x1="12" y1="12" x2="16" y2="12"/></svg>
+        <div class="ops-card-value">${overdue.length}</div>
+        <div class="ops-card-label">Atrasadas</div>
+      </div>
+      <div class="ops-card blue">
+        <svg class="ops-card-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        <div class="ops-card-value">${completedPeriod.length}</div>
+        <div class="ops-card-label">${isToday ? 'Concluídas Hoje' : 'Concluídas'}</div>
+      </div>
+      <div class="ops-card amber">
+        <svg class="ops-card-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <div class="ops-card-value">${pendingPeriod.length}</div>
+        <div class="ops-card-label">Pendentes</div>
+      </div>
+      <div class="ops-card purple">
+        <svg class="ops-card-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+        <div class="ops-card-value">${employees.length}</div>
+        <div class="ops-card-label">Total Equipe</div>
+      </div>
+    </div>
+
+    <div class="ops-grid-2">
+      <div class="card">
+        <div class="card-header"><h3>Produtividade por Área</h3></div>
+        <div class="card-body" style="max-height:300px;overflow-y:auto">
+          ${areaProd.length ? areaProd.map(a => {
+            const pct = a.total ? Math.round(a.done / a.total * 100) : 0;
+            const bg = a.goal > 0 && pct < a.goal ? 'var(--red)' : pct < 30 ? 'var(--red)' : pct < 60 ? 'var(--amber)' : 'var(--green)';
+            return `<div class="ops-area-row"><span>${a.name}</span><div class="ops-bar"><div class="ops-bar-fill" style="width:${Math.min(pct,100)}%;background:${bg}"></div></div><span style="font-size:.78rem;color:var(--text-muted)">${a.done}/${a.total}</span></div>`;
+          }).join('') : '<div class="ops-empty">Nenhuma área cadastrada</div>'}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>Tarefas por Funcionário</h3></div>
+        <div class="card-body" style="max-height:300px;overflow-y:auto">
+          ${employees.length ? employees.map(e => {
+            const et = periodTasks.filter(t => t.assignee === e.id);
+            const done = et.filter(t => t.status === 'completed').length;
+            if (!et.length) return '';
+            return `<div class="ops-worker-row"><div class="emp-avatar-sm" style="background:${randomColor(e.name)}">${getInitials(e.name)}</div><span>${e.name}</span><span style="font-size:.78rem;color:var(--text-muted);margin-left:auto">${done}/${et.length}</span></div>`;
+          }).filter(Boolean).join('') : '<div class="ops-empty">Nenhum funcionário</div>'}
+        </div>
+      </div>
+    </div>
+
+    <div class="ops-grid-2" style="margin-top:1rem">
+      <div class="card">
+        <div class="card-header"><h3>Tarefas Vencidas</h3></div>
+        <div class="card-body" style="max-height:300px;overflow-y:auto">
+          ${overdue.length ? overdue.slice(0, 10).map(t => `<div class="ops-task-row" onclick="showTaskDetail(${t.id})"><span class="ops-task-title">${t.title}</span><span style="font-size:.75rem;color:var(--text-muted)">${getEmployeeName(t.assignee, employees)}</span><span style="font-size:.7rem;color:var(--red);font-weight:600">${t.date}</span></div>`).join('') : '<div class="ops-empty">Nenhuma tarefa atrasada</div>'}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h3>Próximas Entregas</h3></div>
+        <div class="card-body" style="max-height:300px;overflow-y:auto">
+          ${futureTasks.length ? futureTasks.map(t => `<div class="ops-task-row" onclick="showTaskDetail(${t.id})"><span class="ops-task-title">${t.title}</span><span style="font-size:.75rem;color:var(--text-muted)">${getEmployeeName(t.assignee, employees)}</span><span style="font-size:.7rem;color:var(--blue);font-weight:600">${formatDate(t.date)}</span></div>`).join('') : '<div class="ops-empty">Nenhuma entrega programada</div>'}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ============================================
+   METAS E KPIs
+   ============================================ */
+async function renderGoals() {
+  const content = document.getElementById('goals-content');
+  content.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Carregando...</div>`;
+
+  const [goals, employees, sectors, tasks] = await Promise.all([
+    db.getGoals(),
+    getCachedEmployees(),
+    db.getSectors(),
+    getCachedTasks(),
+  ]);
+
+  const typeNames = { company: 'Empresa', sector: 'Setor', employee: 'Colaborador' };
+  const metricNames = { tasks_completed: 'Tarefas Concluídas', manual: 'Personalizada' };
+
+  // Auto-calcular progresso de tarefas concluídas
+  const goalsWithProgress = goals.map(g => {
+    if (g.metric === 'tasks_completed') {
+      let filtered = tasks.filter(t => t.status === 'completed' && t.date >= g.period_start && t.date <= g.period_end);
+      if (g.type === 'employee') filtered = filtered.filter(t => t.assignee === g.target_id);
+      g.current_value = filtered.length;
+    }
+    return g;
+  });
+
+  content.innerHTML = `
+    <div class="goals-filters" style="display:flex;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap">
+      <select id="goals-filter-type" onchange="renderGoals()" style="padding:.35rem .6rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+        <option value="">Todos os Tipos</option>
+        <option value="company">Empresa</option>
+        <option value="sector">Setor</option>
+        <option value="employee">Colaborador</option>
+      </select>
+      <select id="goals-filter-metric" onchange="renderGoals()" style="padding:.35rem .6rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+        <option value="">Todas as Métricas</option>
+        <option value="tasks_completed">Tarefas Concluídas ⭐</option>
+        <option value="manual">Personalizada</option>
+      </select>
+    </div>
+    <div style="margin-bottom:1rem;font-size:.78rem;color:var(--text-muted)">💡 Metas de "Tarefas Concluídas" são calculadas automaticamente. O valor atual é atualizado em tempo real com base nas tarefas concluídas no período.</div>
+    <div class="goals-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1rem">
+      ${goalsWithProgress.length ? goalsWithProgress.filter(g => {
+        const ft = document.getElementById('goals-filter-type')?.value;
+        const fm = document.getElementById('goals-filter-metric')?.value;
+        return (!ft || g.type === ft) && (!fm || g.metric === fm);
+      }).map(g => {
+        const pct = g.target_value > 0 ? Math.min(Math.round(g.current_value / g.target_value * 100), 100) : 0;
+        const pctColor = pct >= 80 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--red)';
+        let targetLabel = typeNames[g.type] || g.type;
+        if (g.type === 'sector') targetLabel += ': ' + (sectors.find(s => s.id === g.target_id)?.name || 'N/A');
+        if (g.type === 'employee') targetLabel += ': ' + (employees.find(e => e.id === g.target_id)?.name || 'N/A');
+        return `<div class="card">
+          <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+            <h3 style="font-size:.9rem">${g.label || metricNames[g.metric] || g.metric}</h3>
+            <div style="display:flex;gap:.25rem">
+              <button class="btn btn-sm btn-secondary" onclick="editGoal(${g.id})" title="Editar">✎</button>
+              <button class="btn btn-sm btn-danger" onclick="deleteGoal(${g.id})" title="Excluir">✕</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:.5rem">${targetLabel}</div>
+            <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:.5rem">${formatDate(g.period_start)} — ${formatDate(g.period_end)}</div>
+            <div style="font-size:1.5rem;font-weight:700;color:${pctColor}">${g.current_value} <span style="font-size:.8rem;color:var(--text-muted);font-weight:400">/ ${g.target_value} ${g.metric === 'tasks_completed' ? 'tarefas' : ''}</span></div>
+            <div style="margin-top:.5rem;height:8px;background:var(--bg);border-radius:4px;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:${pctColor};border-radius:4px;transition:width .3s"></div>
+            </div>
+            <div style="margin-top:.25rem;font-size:.7rem;color:var(--text-muted);text-align:right">${pct}%</div>
+          </div>
+        </div>`;
+      }).join('') : '<div style="grid-column:1/-1;text-align:center;padding:2rem;color:var(--text-muted)">Nenhuma meta cadastrada. Clique em "+ Nova Meta" para começar.</div>'}
+    </div>
+  `;
+
+  document.getElementById('btn-new-goal').onclick = () => showGoalModal();
+}
+
+function showGoalModal(goal) {
+  const title = goal ? 'Editar Meta' : 'Nova Meta';
+  const g = goal || { type: 'company', target_id: null, metric: 'tasks_completed', target_value: 1, current_value: 0, label: '', period_start: todayBrasil(), period_end: todayBrasil() };
+  showModal(title, `
+    <div class="form-group">
+      <label>Tipo</label>
+      <select id="goal-type" onchange="updateGoalTargets()" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+        <option value="company" ${g.type === 'company' ? 'selected' : ''}>Empresa</option>
+        <option value="sector" ${g.type === 'sector' ? 'selected' : ''}>Setor</option>
+        <option value="employee" ${g.type === 'employee' ? 'selected' : ''}>Colaborador</option>
+      </select>
+    </div>
+    <div class="form-group" id="goal-target-group" style="display:${g.type === 'company' ? 'none' : 'block'}">
+      <label>${g.type === 'sector' ? 'Setor' : 'Colaborador'}</label>
+      <select id="goal-target-id" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)"></select>
+    </div>
+    <div class="form-group">
+      <label>Métrica</label>
+      <select id="goal-metric" onchange="toggleGoalCurrent()" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+        <option value="tasks_completed" ${g.metric === 'tasks_completed' ? 'selected' : ''}>Tarefas Concluídas (automático) ⭐</option>
+        <option value="manual" ${g.metric === 'manual' ? 'selected' : ''}>Personalizada (manual)</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Nome Personalizado (opcional)</label>
+      <input type="text" id="goal-label" value="${g.label}" placeholder="Ex: Meta de Tarefas Q1" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+    </div>
+    <div class="form-group">
+      <label>Valor Alvo</label>
+      <input type="number" id="goal-target" value="${g.target_value}" min="1" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+    </div>
+    <div class="form-group" id="goal-current-group" style="display:${g.metric === 'manual' ? 'block' : 'none'}">
+      <label>Valor Atual (manual)</label>
+      <input type="number" id="goal-current" value="${g.current_value}" min="0" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+      <div style="font-size:.75rem;color:var(--text-muted);margin-top:.25rem">Apenas para metas personalizadas. Para Tarefas Concluídas o valor é calculado automaticamente.</div>
+    </div>
+    <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem">
+      <div class="form-group">
+        <label>Início</label>
+        <input type="date" id="goal-start" value="${g.period_start}" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+      </div>
+      <div class="form-group">
+        <label>Fim</label>
+        <input type="date" id="goal-end" value="${g.period_end}" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+      </div>
+    </div>
+    <div style="margin-top:1rem;display:flex;gap:.5rem;justify-content:flex-end">
+      <button class="btn btn-primary" onclick="saveGoal(${g.id || 'null'})">Salvar</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    </div>
+  `);
+  updateGoalTargets();
+}
+
+function toggleGoalCurrent() {
+  const isManual = document.getElementById('goal-metric')?.value === 'manual';
+  const group = document.getElementById('goal-current-group');
+  if (group) group.style.display = isManual ? 'block' : 'none';
+}
+
+async function updateGoalTargets() {
+  const type = document.getElementById('goal-type')?.value;
+  const group = document.getElementById('goal-target-group');
+  if (group) group.style.display = type === 'company' ? 'none' : 'block';
+  const sel = document.getElementById('goal-target-id');
+  if (!sel) return;
+  const data = type === 'sector' ? await getCachedSectors() : await getCachedEmployees();
+  sel.innerHTML = data.length ? data.map(d => `<option value="${d.id}">${d.name}</option>`).join('') : '<option value="">Nenhum encontrado</option>';
+}
+
+async function saveGoal(id) {
+  const goalType = document.getElementById('goal-type').value;
+  const metric = document.getElementById('goal-metric').value;
+  const g = {
+    type: goalType,
+    target_id: goalType === 'company' ? null : parseInt(document.getElementById('goal-target-id').value) || null,
+    metric,
+    label: document.getElementById('goal-label').value.trim(),
+    target_value: parseFloat(document.getElementById('goal-target').value) || 0,
+    current_value: metric === 'manual' ? (parseFloat(document.getElementById('goal-current').value) || 0) : 0,
+    period_start: document.getElementById('goal-start').value,
+    period_end: document.getElementById('goal-end').value,
+  };
+  if (g.target_value <= 0) { showToast('Valor alvo deve ser maior que zero', 'error'); return; }
+  try {
+    if (id) { await db.updateGoal(id, g); showToast('Meta atualizada!', 'success'); }
+    else { await db.insertGoal(g); showToast('Meta criada!', 'success'); }
+    closeModal();
+    renderGoals();
+  } catch (e) { showToast('Erro ao salvar meta: ' + e.message, 'error'); }
+}
+
+async function editGoal(id) {
+  const goals = await db.getGoals();
+  const g = goals.find(x => x.id === id);
+  if (g) showGoalModal(g);
+}
+
+async function deleteGoal(id) {
+  if (!confirm('Excluir esta meta?')) return;
+  await db.deleteGoal(id);
+  showToast('Meta excluída!', 'success');
+  renderGoals();
+}
+
+/* ============================================
+   DOCUMENTOS DA EMPRESA
+   ============================================ */
+async function renderDocs() {
+  const content = document.getElementById('docs-content');
+  content.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Carregando...</div>`;
+  const [docs, employees] = await Promise.all([db.getCompanyDocs(), getCachedEmployees()]);
+  const catFilter = document.getElementById('filter-doc-category')?.value || 'all';
+  const catNames = { contrato: 'Contrato', procedimento: 'Procedimento', norma: 'Norma', treinamento: 'Treinamento', outros: 'Outros' };
+  const filtered = catFilter === 'all' ? docs : docs.filter(d => d.category === catFilter);
+  const grouped = {};
+  (catFilter === 'all' ? Object.keys(catNames) : [catFilter]).forEach(c => { grouped[c] = filtered.filter(d => d.category === c); });
+  content.innerHTML = Object.entries(grouped).filter(([,v]) => v.length).map(([cat, items]) => `
+    <div class="card" style="margin-bottom:.75rem">
+      <div class="card-header"><h3>${catNames[cat] || cat} (${items.length})</h3></div>
+      <div class="card-body">
+        ${items.map(d => {
+          const emp = d.employee_id ? employees.find(e => e.id === d.employee_id) : null;
+          return `
+          <div class="ops-worker-row" style="justify-content:space-between;flex-wrap:wrap;gap:.35rem">
+            <div style="display:flex;align-items:center;gap:.5rem;flex:1;min-width:0">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.name}</span>
+              ${emp ? `<span style="font-size:.7rem;color:var(--blue)">→ ${emp.name}</span>` : ''}
+              ${d.signed_by ? `<span style="font-size:.7rem;color:var(--green)">✍️ ${d.signed_by}</span>` : ''}
+            </div>
+            <div style="display:flex;gap:.25rem;align-items:center;flex-shrink:0;flex-wrap:wrap">
+              ${d.file_url ? `<button class="btn btn-sm btn-secondary" onclick="previewDoc('${d.file_url}','${d.name.replace(/'/g, "\\'")}')" style="font-size:.7rem;padding:.15rem .35rem" title="Visualizar">👁️</button>` : ''}
+              ${d.file_url ? `<a href="${d.file_url}" target="_blank" class="btn btn-sm btn-secondary" style="font-size:.7rem;padding:.15rem .35rem;text-decoration:none" download>📥</a>` : ''}
+              ${!d.signed_by ? `<button class="btn btn-sm btn-secondary" onclick="signDoc(${d.id})" style="font-size:.7rem;padding:.15rem .35rem" title="Assinar">✍️</button>` : ''}
+              <span style="font-size:.7rem;color:var(--text-muted)">${(d.created_at || '').substring(0, 10)}</span>
+              <button class="btn btn-sm btn-danger" onclick="deleteDoc(${d.id})" title="Excluir" style="font-size:.75rem;padding:.15rem .35rem">✕</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `).join('') || '<div class="ops-empty" style="margin-top:1rem;text-align:center;padding:2rem;color:var(--text-muted)">Nenhum documento encontrado. Clique em "+ Novo Documento" para adicionar.</div>';
+
+  document.getElementById('btn-new-doc').onclick = () => showDocModal();
+}
+
+function previewDoc(url, name) {
+  const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(url);
+  const isPdf = /\.pdf$/i.test(url);
+  if (isImage) {
+    openModal(name, `<div style="text-align:center"><img src="${url}" style="max-width:100%;max-height:80vh;border-radius:var(--radius-md)"></div>`);
+  } else if (isPdf) {
+    openModal(name, `<iframe src="${url}" style="width:100%;height:80vh;border:none;border-radius:var(--radius-md)"></iframe>`);
+  } else {
+    window.open(url, '_blank');
+  }
+}
+
+function showDocModal(existingDoc) {
+  const employeesPromise = getCachedEmployees();
+  employeesPromise.then(employees => {
+    openModal(existingDoc ? 'Editar Documento' : 'Novo Documento', `
+      <div class="form-group">
+        <label>Nome do Documento</label>
+        <input type="text" id="doc-name" value="${existingDoc ? existingDoc.name : ''}" placeholder="Ex: Contrato de Prestação de Serviços" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+      </div>
+      <div class="form-group">
+        <label>Categoria</label>
+        <select id="doc-category" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+          <option value="contrato" ${existingDoc?.category==='contrato'?'selected':''}>Contrato</option>
+          <option value="procedimento" ${existingDoc?.category==='procedimento'?'selected':''}>Procedimento</option>
+          <option value="norma" ${existingDoc?.category==='norma'?'selected':''}>Norma</option>
+          <option value="treinamento" ${existingDoc?.category==='treinamento'?'selected':''}>Treinamento</option>
+          <option value="outros" ${existingDoc?.category==='outros'?'selected':''}>Outros</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Atribuir a Funcionário (opcional)</label>
+        <select id="doc-employee" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+          <option value="">— Nenhum —</option>
+          ${employees.map(e => `<option value="${e.id}" ${existingDoc?.employee_id==e.id?'selected':''}>${e.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Arquivo</label>
+        <input type="file" id="doc-file" style="width:100%;padding:.5rem;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-card);color:var(--text)">
+        <div style="font-size:.75rem;color:var(--text-muted);margin-top:.25rem">${existingDoc?.file_url ? 'Arquivo atual: ' + existingDoc.file_url : 'Selecione o arquivo para upload'}</div>
+      </div>
+      <div id="doc-upload-progress" style="display:none;font-size:.82rem;color:var(--text-muted);text-align:center;padding:.5rem">Enviando...</div>
+      <div style="margin-top:1rem;display:flex;gap:.5rem;justify-content:flex-end">
+        <button class="btn btn-primary" onclick="saveDoc(${existingDoc ? existingDoc.id : ''})">Salvar</button>
+        <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+      </div>
+    `);
+  });
+}
+
+async function saveDoc(existingId) {
+  const name = document.getElementById('doc-name').value.trim();
+  const category = document.getElementById('doc-category').value;
+  const employee_id = document.getElementById('doc-employee')?.value ? Number(document.getElementById('doc-employee').value) : null;
+  const fileInput = document.getElementById('doc-file');
+  if (!name) { showToast('Informe o nome do documento', 'error'); return; }
+  let file_url = '';
+  if (fileInput && fileInput.files && fileInput.files[0]) {
+    const file = fileInput.files[0];
+    document.getElementById('doc-upload-progress').style.display = 'block';
+    const reader = new FileReader();
+    const b64 = await new Promise(resolve => { reader.onload = e => resolve(e.target.result.split(',')[1]); reader.readAsDataURL(file); });
+    const res = await fetch('/api/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: file.name, data: b64 }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    file_url = data.url;
+  }
+  try {
+    const doc = { name, category, file_url, employee_id };
+    if (existingId) {
+      if (!file_url) delete doc.file_url;
+      await db.updateCompanyDoc(existingId, doc);
+      showToast('Documento atualizado!', 'success');
+    } else {
+      await db.insertCompanyDoc(doc);
+      showToast('Documento adicionado!', 'success');
+    }
+    closeModal();
+    renderDocs();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function signDoc(id) {
+  const name = prompt('Nome para assinatura:');
+  if (!name || !name.trim()) return;
+  try {
+    await db.updateCompanyDoc(id, { signed_by: name.trim(), signed_at: new Date().toISOString() });
+    showToast('✅ Documento assinado por ' + name.trim(), 'success');
+    renderDocs();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function deleteDoc(id) {
+  if (!confirm('Excluir este documento?')) return;
+  await db.deleteCompanyDoc(id);
+  showToast('Documento excluído!', 'success');
+  renderDocs();
+}
+
+/* ============================================
+   AUTOMAÇÕES (Rule Builder + Trigger Engine)
+   ============================================ */
+async function renderAutomation() {
+  const content = document.getElementById('automation-content');
+  content.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Carregando...</div>`;
+  const rules = await db.getAutomationRules();
+
+  const triggerLabels = {
+    task_created: 'Tarefa Criada',
+    task_completed: 'Tarefa Concluída',
+    task_overdue: 'Tarefa Atrasada',
+    schedule: 'Agendamento (horário)',
+    employee_inactive: 'Funcionário Inativo',
+  };
+  const actionLabels = {
+    assign_task: 'Atribuir Tarefa',
+    send_notification: 'Enviar Notificação',
+    update_status: 'Alterar Status',
+    create_task: 'Criar Tarefa',
+    notify_gestor: 'Notificar Gestor',
+  };
+  const triggerIcons = { task_created:'📋', task_completed:'✅', task_overdue:'⏰', schedule:'🕐', employee_inactive:'😴' };
+  const actionIcons = { assign_task:'👤', send_notification:'🔔', update_status:'🔄', create_task:'➕', notify_gestor:'📢' };
+
+  if (!rules.length) {
+    content.innerHTML = `
+      <div class="auto-empty">
+        <div class="auto-empty-icon">⚡</div>
+        <div class="auto-empty-text">Nenhuma regra de automação criada</div>
+        <div class="auto-empty-sub">Crie regras SE/ENTÃO para automatizar tarefas e notificações</div>
+      </div>`;
+    document.getElementById('btn-new-rule').onclick = () => showRuleModal();
+    return;
+  }
+
+  content.innerHTML = `<div class="auto-grid">
+    ${rules.map(r => {
+      const tc = r.trigger_config || {};
+      const ac = r.action_config || {};
+      const tIcon = triggerIcons[r.trigger_type] || '⚡';
+      const aIcon = actionIcons[r.action_type] || '⚡';
+      return `<div class="auto-card ${r.active ? '' : 'inactive'}">
+        <div class="auto-card-header">
+          <div class="auto-card-header-left">
+            <div class="auto-icon ${r.active ? 'active' : ''}">${r.active ? '⚡' : '⏸'}</div>
+            <h3 class="auto-name">${r.name}</h3>
+          </div>
+          <div class="auto-card-actions">
+            <label class="auto-toggle">
+              <input type="checkbox" ${r.active ? 'checked' : ''} onchange="toggleRule(${r.id}, this.checked)">
+              Ativo
+            </label>
+            <button class="btn btn-sm btn-secondary" onclick="editRule(${r.id})" title="Editar">✎</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteRule(${r.id})" title="Excluir">✕</button>
+          </div>
+        </div>
+        <div class="auto-card-body">
+          <div class="auto-pipeline">
+            <div class="auto-step">
+              <span class="auto-step-label">${tIcon} SE</span>
+              <span class="auto-step-title">${triggerLabels[r.trigger_type] || r.trigger_type}</span>
+              ${tc.sector ? `<span class="auto-step-detail">Setor: ${tc.sector}</span>` : ''}
+              ${tc.delay_minutes ? `<span class="auto-step-detail">Após ${tc.delay_minutes} min</span>` : ''}
+            </div>
+            <div class="auto-arrow">→</div>
+            <div class="auto-step">
+              <span class="auto-step-label">${aIcon} ENTÃO</span>
+              <span class="auto-step-title">${actionLabels[r.action_type] || r.action_type}</span>
+              ${ac.title ? `<span class="auto-step-detail">Tarefa: ${ac.title}</span>` : ''}
+              ${ac.message ? `<span class="auto-step-detail">Msg: ${ac.message}</span>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
+
+  document.getElementById('btn-new-rule').onclick = () => showRuleModal();
+}
+
+function showRuleModal(rule) {
+  const r = rule || { name: '', trigger_type: 'task_created', trigger_config: {}, action_type: 'send_notification', action_config: {}, active: true };
+  const tc = r.trigger_config || {};
+  const ac = r.action_config || {};
+
+  const catOptions = [
+    { k: 'task_created', v: 'Tarefa for criada', icon: '📋' },
+    { k: 'task_completed', v: 'Tarefa for concluída', icon: '✅' },
+    { k: 'task_overdue', v: 'Tarefa atrasar', icon: '⏰' },
+    { k: 'employee_inactive', v: 'Funcionário ficar inativo', icon: '😴' },
+  ];
+  const actOptions = [
+    { k: 'send_notification', v: 'Notificar equipe', icon: '🔔' },
+    { k: 'notify_gestor', v: 'Notificar gestor', icon: '📢' },
+    { k: 'create_task', v: 'Criar nova tarefa', icon: '➕' },
+    { k: 'assign_task', v: 'Atribuir para alguém', icon: '👤' },
+  ];
+
+  showModal(rule ? 'Editar Regra' : 'Nova Regra de Automação', `
+    <div class="form-group"><label>Nome da regra</label><input type="text" id="rule-name" value="${r.name}" placeholder="Ex: Notificar atrasos" class="auto-config-input"></div>
+    <div class="form-group">
+      <label style="display:block;margin-bottom:.35rem;font-size:.82rem;color:var(--text-muted)">SE (gatilho)</label>
+      <div class="auto-modal-grid">
+        ${catOptions.map(o => `<button type="button" class="auto-option-btn ${r.trigger_type === o.k ? 'selected' : ''}" onclick="selectTrigger('${o.k}',this)">${o.icon} ${o.v}</button>`).join('')}
+      </div>
+      <input type="hidden" id="rule-trigger" value="${r.trigger_type}">
+    </div>
+    <div class="form-group">
+      <label style="display:block;margin-bottom:.35rem;font-size:.82rem;color:var(--text-muted)">ENTÃO (ação)</label>
+      <div class="auto-modal-grid">
+        ${actOptions.map(o => `<button type="button" class="auto-option-btn ${r.action_type === o.k ? 'selected' : ''}" onclick="selectAction('${o.k}',this)">${o.icon} ${o.v}</button>`).join('')}
+      </div>
+      <input type="hidden" id="rule-action" value="${r.action_type}">
+    </div>
+    <div class="auto-config-box">
+      <div class="form-group"><label>Mensagem ou título da tarefa</label><input type="text" id="rule-action-message" value="${ac.title || ac.message || ''}" placeholder="Ex: Revisar urgente" class="auto-config-input"></div>
+      <div class="form-group"><label>Setor (opcional, vazio = todos)</label><input type="text" id="rule-trigger-sector" value="${tc.sector || ''}" placeholder="Ex: Operações" class="auto-config-input"></div>
+    </div>
+    <div style="margin-top:1rem;display:flex;gap:.5rem;justify-content:flex-end">
+      <button class="btn btn-primary" onclick="saveRule(${r.id || 'null'})">Salvar</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    </div>
+  `);
+}
+
+function selectTrigger(val, btn) {
+  document.getElementById('rule-trigger').value = val;
+  btn.closest('div').querySelectorAll('.selected').forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+}
+
+function selectAction(val, btn) {
+  document.getElementById('rule-action').value = val;
+  btn.closest('div').querySelectorAll('.selected').forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+}
+
+async function saveRule(id) {
+  const rule = {
+    name: document.getElementById('rule-name').value.trim() || 'Regra sem nome',
+    trigger_type: document.getElementById('rule-trigger').value,
+    action_type: document.getElementById('rule-action').value,
+    trigger_config: {
+      sector: document.getElementById('rule-trigger-sector').value.trim() || null,
+    },
+    action_config: {
+      title: document.getElementById('rule-action-message').value.trim(),
+      message: document.getElementById('rule-action-message').value.trim(),
+    },
+    active: true,
+  };
+  try {
+    if (id) { await db.updateAutomationRule(id, rule); showToast('Regra atualizada!', 'success'); }
+    else { await db.insertAutomationRule(rule); showToast('Regra criada!', 'success'); }
+    closeModal();
+    renderAutomation();
+  } catch (e) { showToast('Erro: ' + e.message, 'error'); }
+}
+
+async function toggleRule(id, active) {
+  await db.updateAutomationRule(id, { active });
+  showToast(active ? 'Regra ativada' : 'Regra desativada', 'info');
+}
+
+async function editRule(id) {
+  const rules = await db.getAutomationRules();
+  const r = rules.find(x => x.id === id);
+  if (r) showRuleModal(r);
+}
+
+async function deleteRule(id) {
+  if (!confirm('Excluir esta regra?')) return;
+  await db.deleteAutomationRule(id);
+  showToast('Regra excluída!', 'success');
+  renderAutomation();
+}
+
+// Trigger Engine — called when tasks change
+async function runTriggerEngine(eventType, eventData) {
+  try {
+    const rules = await db.getAutomationRules();
+    const matching = rules.filter(r => r.active && r.trigger_type === eventType);
+    for (const rule of matching) {
+      const tc = rule.trigger_config || {};
+      const ac = rule.action_config || {};
+      // Check sector filter
+      if (tc.sector && eventData.sector && eventData.sector !== tc.sector) continue;
+      // Execute action
+      switch (rule.action_type) {
+        case 'send_notification':
+          showToast('🔔 ' + (ac.message || ac.title || 'Notificação automática'), 'info');
+          break;
+        case 'notify_gestor':
+          showToast('📋 ' + (ac.message || 'Notificação para o gestor'), 'info');
+          break;
+        case 'create_task':
+          try {
+            await db.insertTask({
+              title: ac.title || 'Tarefa automática',
+              description: ac.message || '',
+              date: todayBrasil(),
+              status: 'pending',
+              assignee: ac.assignee || App.state.user?.id || null,
+            });
+            showToast('✅ Tarefa automática criada!', 'success');
+          } catch (e) { console.warn('Auto task creation failed:', e); }
+          break;
+        case 'assign_task':
+          if (eventData.taskId && ac.assignee) {
+            await db.updateTask(eventData.taskId, { assignee: ac.assignee });
+          }
+          break;
+        case 'update_status':
+          if (eventData.taskId && ac.status) {
+            await db.updateTask(eventData.taskId, { status: ac.status });
+          }
+          break;
+      }
+    }
+  } catch (e) { console.warn('Trigger engine:', e); }
+}
+
+/* ============================================
+   JORNADA (Check-in/out)
+   ============================================ */
+/* ============================================
+   QUALITY RATING
+   ============================================ */
+async function rateTask(taskId) {
+  const t = await db.getTask(taskId);
+  if (!t) return;
+  openModal('Avaliar: ' + t.title, `
+    <div style="margin-bottom:1rem;font-size:.85rem;color:var(--text-secondary)">Avalie a execução desta tarefa</div>
+    <div class="form-group"><label>Qualidade (1-5)</label><input type="number" id="r-quality" min="1" max="5" value="5"></div>
+    <div class="form-group"><label>Prazo (1-5)</label><input type="number" id="r-deadline" min="1" max="5" value="5"></div>
+    <div class="form-group"><label>Execução (1-5)</label><input type="number" id="r-execution" min="1" max="5" value="5"></div>
+    <div class="form-group"><label>Comentário</label><textarea id="r-comment" placeholder="Opcional"></textarea></div>
+    <div class="form-row">
+      <button class="btn btn-primary" onclick="saveRating(${taskId})">Salvar Avaliação</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
+    </div>
+  `);
+}
+
+async function saveRating(taskId) {
+  const quality = parseInt(document.getElementById('r-quality').value);
+  const deadline = parseInt(document.getElementById('r-deadline').value);
+  const execution = parseInt(document.getElementById('r-execution').value);
+  const comment = document.getElementById('r-comment').value.trim();
+  if (!quality || !deadline || !execution) { showToast('Preencha todas as notas', 'error'); return; }
+  await db.insertQualityRating({ task_id: taskId, evaluator_id: App.state.user.id, quality_score: quality, deadline_score: deadline, execution_score: execution, comment });
+  closeModal();
+  showToast('Avaliação registrada!', 'success');
+}
+
+/* ============================================
+   OPS AI
+   ============================================ */
+function openOPSAI() {
+  const msgs = App.state.aiMessages || [];
+  App.state._aiSending = false;
+  showModal('🤖 OPS AI', renderAIChat(msgs));
+  document.getElementById('modal-container').classList.add('large');
+  document.getElementById('modal-body').style.padding = '0';
+  document.getElementById('modal-body').style.display = 'flex';
+  document.getElementById('modal-body').style.flexDirection = 'column';
+  // Preenche mensagens com innerHTML para suportar HTML (ex: botão retry)
+  msgs.forEach((m, i) => {
+    const el = document.getElementById('ai-msg-' + i);
+    if (el) el.innerHTML = m.content;
+  });
+  setTimeout(() => {
+    const input = document.getElementById('ai-input');
+    if (input) input.focus();
+    const c = document.getElementById('ai-chat');
+    if (c) c.scrollTop = c.scrollHeight;
+  }, 50);
+}
+
+function renderAIChat(messages) {
+  const suggested = !messages.length;
+  return `
+    <div id="ai-chat" style="flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.75rem;min-height:350px;max-height:450px">
+      ${suggested ? `
+        <div style="text-align:center;color:var(--text-muted);font-size:.85rem;padding:1rem 0">Pergunte algo sobre sua operação ou clique em uma sugestão:</div>
+        <div style="display:flex;flex-wrap:wrap;gap:.4rem;justify-content:center;margin-bottom:.5rem">
+          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Como está minha operação hoje?')">📊 Status geral</button>
+          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Quem está improdutivo?')">😴 Inativos</button>
+          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Qual área com pior desempenho?')">📉 Pior área</button>
+          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Tarefas críticas atrasadas')">⚠️ Atrasadas</button>
+          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Ranking de desempenho da equipe')">🏆 Ranking</button>
+        </div>
+      ` : ''}
+      ${messages.map((m, i) => `
+        <div style="display:flex;${m.role === 'user' ? 'justify-content:flex-end' : 'justify-content:flex-start'}">
+          <div id="ai-msg-${i}" style="max-width:85%;padding:.6rem .85rem;border-radius:12px;${m.role === 'user' ? 'background:var(--blue);color:#fff;border-bottom-right-radius:4px' : 'background:var(--bg);color:var(--text);border-bottom-left-radius:4px'};white-space:pre-wrap;line-height:1.5;font-size:.88rem"></div>
+        </div>
+      `).join('')}
+      <div id="ai-loading" style="display:none;text-align:center;color:var(--text-muted);font-size:.82rem">🤔 Pensando...</div>
+    </div>
+    <div style="display:flex;gap:.5rem;padding:.75rem 1rem;border-top:1px solid var(--border);background:var(--bg-card)">
+      <input type="text" id="ai-input" placeholder="Digite sua pergunta..." onkeydown="if(event.key==='Enter'&&!App.state._aiSending)sendAIMessage()" style="flex:1;padding:.6rem .85rem;border-radius:20px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.88rem;outline:none">
+      <button id="btn-ai-send" class="btn btn-primary" onclick="if(!App.state._aiSending)sendAIMessage()" style="border-radius:50%;width:38px;height:38px;padding:0;display:flex;align-items:center;justify-content:center;font-size:1.1rem">➤</button>
+    </div>
+  `;
+}
+
+function suggestAI(question) {
+  if (!App.state.aiMessages) App.state.aiMessages = [];
+  App.state.aiMessages.push({ role: 'user', content: question });
+  openOPSAI();
+  sendAIMessage(true);
+}
+
+async function collectOpsContext() {
+  const [employees, tasks, sectors, allocations] = await Promise.all([
+    getCachedEmployees(), getCachedTasks(), db.getSectors(), getCachedAllocations(),
+  ]);
+  const today = todayBrasil();
+  const todayAllocs = allocations.filter(a => (a.allocated_at || '').startsWith(today));
+  return {
+    today, totalEmployees: employees.length,
+    employees: employees.map(e => ({ id: e.id, name: e.name, role: e.role, area: todayAllocs.find(a => a.employee_id === e.id)?.area || '' })),
+    totalTasks: tasks.length,
+    completedToday: tasks.filter(t => t.status === 'completed' && t.date === today).length,
+    overdueTasks: tasks.filter(t => t.status !== 'completed' && t.date < today).length,
+    pendingTasks: tasks.filter(t => t.status !== 'completed' && t.date >= today).length,
+    sectors: sectors?.map(s => ({ name: s.name, goal: s.goal })) || [],
+    allocations: todayAllocs.map(a => ({ employee: getEmployeeName(a.employee_id, employees), area: a.area })),
+    recentTasks: tasks.slice(0, 20).map(t => ({ title: t.title, status: t.status, date: t.date, assignee: getEmployeeName(t.assignee, employees) })),
+  };
+}
+
+async function sendAIMessage(skipRender) {
+  if (App.state._aiSending) return;
+
+  App.state._aiSending = true;
+
+  const input = document.getElementById('ai-input');
+  const text = skipRender ? null : (input?.value?.trim() || '');
+  if (!text && !skipRender) { App.state._aiSending = false; return; }
+  const q = text || (App.state.aiMessages?.length ? App.state.aiMessages[App.state.aiMessages.length - 1]?.content : '');
+  if (!q) { App.state._aiSending = false; return; }
+
+  if (!skipRender) {
+    if (!App.state.aiMessages) App.state.aiMessages = [];
+    App.state.aiMessages.push({ role: 'user', content: q });
+    if (input) input.value = '';
+    openOPSAI();
+  }
+
+  document.getElementById('ai-loading').style.display = 'block';
+
+  const DEFAULT_GROQ_KEY = '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';
+  const apiKey = localStorage.getItem('ops-ai-key') || DEFAULT_GROQ_KEY;
+  const context = await collectOpsContext();
+
+  if (!apiKey) {
+    App.state.aiMessages.push({ role: 'assistant', content: '💡 Análise local (sem chave API):\n\n' + localAnalysis(q, context) });
+    App.state._aiSending = false;
+    openOPSAI();
+    return;
+  }
+
+  const systemPrompt = `Você é o OPS AI. Responda em português (pt-BR) de forma direta e profissional.
+
+DADOS DA OPERAÇÃO (${context.today}):
+- Total de funcionários: ${context.totalEmployees}
+- Tarefas: ${context.totalTasks} total | ${context.completedToday} concluídas hoje | ${context.overdueTasks} atrasadas | ${context.pendingTasks} pendentes
+- Setores: ${context.sectors.map(s => s.name + (s.goal ? ' (meta ' + s.goal + '%)' : '')).join(', ') || 'Nenhum'}
+- Alocações do dia: ${context.allocations.length ? context.allocations.map(a => a.employee + ' → ' + a.area).join(' | ') : 'Nenhuma'}
+
+Funcionários:
+${context.employees.map(e => '- ' + e.name + ' (' + e.role + ')' + (e.area ? ' → ' + e.area : '')).join('\n')}
+
+Tarefas recentes:
+${context.recentTasks.map(t => '- "' + t.title + '" | ' + t.status + ' | ' + t.date + ' | ' + t.assignee).join('\n')}`;
+
+  try {
+    const res = await fetch('/api/ai', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: q }], systemPrompt, apiKey, provider: 'groq' }),
+    });
+    if (!res.ok) throw new Error('API retornou ' + res.status + ': ' + (await res.text()));
+    const data = await res.json();
+    if (data.error) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+    const answer = data.choices?.[0]?.message?.content;
+    if (!answer) throw new Error('Resposta vazia da API');
+    App.state.aiMessages.push({ role: 'assistant', content: answer });
+    App.state._aiRateLimited = null;
+  } catch (e) {
+    const msg = e.message || 'Erro desconhecido';
+    App.state.aiMessages.push({ role: 'assistant', content: '⚠️ Erro na API: ' + msg + '\n\n💡 Análise local:\n\n' + localAnalysis(q, context) + '\n\n<button class="btn btn-sm btn-primary" onclick="App.state._aiRateLimited=null;sendAIMessage(true)" style="margin-top:.5rem">🔄 Tentar novamente</button>' });
+  }
+
+  App.state._aiSending = false;
+  openOPSAI();
+}
+
+function localAnalysis(query, context) {
+  const q = query.toLowerCase();
+  if (q.includes('atrasada') || q.includes('crítica') || q.includes('vencida')) {
+    return `⚠️ ${context.overdueTasks} tarefas atrasadas`;
+  }
+  return '💡 Pergunte sobre status, atrasadas ou desempenho.';
+}
+
+/* ============================================
    PHOTO ZOOM
    ============================================ */
 function openPhotoZoom(src) {
@@ -3077,8 +4178,29 @@ async function renderSettings() {
     recOpts = recurrenceOptions();
   }
 
+  const cs = await getCompanySettings();
+
   container.innerHTML = `
     <div class="card">
+      <div class="card-header"><h3>🏢 Dados da Empresa</h3></div>
+      <div class="card-body">
+        <div class="company-settings-grid">
+          <div class="form-group"><label>Nome da Empresa</label><input type="text" id="cs-name" value="${cs.name}" class="auto-config-input" placeholder="Minha Empresa"></div>
+          <div class="form-group"><label>CNPJ</label><input type="text" id="cs-cnpj" value="${cs.cnpj}" class="auto-config-input" placeholder="00.000.000/0001-00"></div>
+          <div class="form-group" style="grid-column:1/-1"><label>Endereço</label><input type="text" id="cs-address" value="${cs.address}" class="auto-config-input" placeholder="Rua, número, bairro, cidade"></div>
+          <div class="form-group"><label>Telefone</label><input type="text" id="cs-phone" value="${cs.phone}" class="auto-config-input" placeholder="(11) 99999-9999"></div>
+          <div class="form-group"><label>E-mail</label><input type="email" id="cs-email" value="${cs.email}" class="auto-config-input" placeholder="contato@empresa.com"></div>
+          <div class="form-group"><label>Logo</label>
+            <div class="company-logo-upload" onclick="document.getElementById('cs-logo-input').click()" id="cs-logo-preview">
+              ${cs.logo ? `<img src="${cs.logo}">` : '<span style="font-size:2rem;opacity:.4">📷</span>'}
+            </div>
+            <input type="file" id="cs-logo-input" accept="image/*" style="display:none" onchange="handleCompanyLogo(event)">
+          </div>
+        </div>
+        <button class="btn btn-primary" style="margin-top:.75rem" onclick="saveCompanySettings()">Salvar Dados</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:1rem">
       <div class="card-header"><h3>Setores / Áreas de Trabalho</h3></div>
       <div class="card-body">
         ${dbEmpty ? `<div style="font-size:.85rem;color:var(--text-muted);margin-bottom:1rem">Nenhum setor cadastrado.</div>` : ''}
@@ -3094,7 +4216,6 @@ async function renderSettings() {
         <div class="recurrence-list" id="recurrence-list">
           ${recOpts.map((r, i) => `<div class="recurrence-item" data-recidx="${i}">
             <div class="recurrence-info">
-              <span class="recurrence-key">${r.key}</span>
               <span class="recurrence-label">${r.label}</span>
             </div>
             <div class="recurrence-actions">
@@ -3108,6 +4229,201 @@ async function renderSettings() {
     </div>`;
 
   document.getElementById('btn-new-sector').addEventListener('click', showNewSectorModal);
+}
+
+/* ============================================
+   COMPANY SETTINGS
+   ============================================ */
+async function getCompanySettings() {
+  try {
+    const c = await db.getCompany(App.state.user?.company_id);
+    if (c) {
+      const data = { name: c.name || '', cnpj: c.cnpj || '', address: c.address || '', phone: c.phone || '', email: c.email || '', logo: c.logo_url || '' };
+      localStorage.setItem('ops-company', JSON.stringify(data));
+      return data;
+    }
+  } catch (e) {}
+  try { return JSON.parse(localStorage.getItem('ops-company') || '{}'); } catch (e) { return {}; }
+}
+
+function handleCompanyLogo(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const preview = document.getElementById('cs-logo-preview');
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    preview.innerHTML = `<img src="${ev.target.result}" style="width:100%;height:100%;object-fit:contain">`;
+  };
+  reader.readAsDataURL(file);
+  // Upload happens on save
+  window._pendingLogo = file;
+}
+
+async function saveCompanySettings() {
+  const companyId = App.state.user?.company_id;
+  if (!companyId) { showToast('Empresa não identificada', 'error'); return; }
+
+  let logoUrl = (document.querySelector('#cs-logo-preview img') || {}).src || '';
+  if (window._pendingLogo) {
+    try {
+      logoUrl = await db.uploadCompanyLogo(window._pendingLogo);
+    } catch (e) {
+      showToast('Erro ao enviar logo: ' + e.message, 'warning');
+    }
+    delete window._pendingLogo;
+  }
+
+  const data = {
+    name: document.getElementById('cs-name').value.trim(),
+    cnpj: document.getElementById('cs-cnpj').value.trim(),
+    address: document.getElementById('cs-address').value.trim(),
+    phone: document.getElementById('cs-phone').value.trim(),
+    email: document.getElementById('cs-email').value.trim(),
+    logo: logoUrl,
+  };
+  localStorage.setItem('ops-company', JSON.stringify(data));
+  try {
+    await db.updateCompany(companyId, {
+      name: data.name,
+      cnpj: data.cnpj,
+      address: data.address,
+      phone: data.phone,
+      email: data.email,
+      logo_url: data.logo,
+    });
+  } catch (e) {
+    showToast('Dados salvos localmente, mas erro no servidor: ' + e.message, 'warning');
+    return;
+  }
+  showToast('Dados da empresa salvos!', 'success');
+}
+
+/* ============================================
+   PRINT / REPORT SYSTEM
+   ============================================ */
+async function printReport(title, contentHtml) {
+  const cs = await getCompanySettings();
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('pt-BR') + ' às ' + now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+  const printHtml = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>${title}</title>
+<style>
+  @page { margin: 20mm 15mm }
+  * { box-sizing:border-box;margin:0;padding:0 }
+  body { font-family: 'Segoe UI', Roboto, Arial, sans-serif; color:#1a1a1a; font-size:11pt; line-height:1.5; padding:0 10mm }
+  .report-header { display:flex;align-items:center;gap:1rem;padding-bottom:1rem;border-bottom:2px solid #2563eb;margin-bottom:1.5rem }
+  .report-logo { width:70px;height:70px;border-radius:6px;overflow:hidden;flex-shrink:0 }
+  .report-logo img { width:100%;height:100%;object-fit:contain }
+  .report-company { flex:1 }
+  .report-company h1 { font-size:16pt;margin:0;color:#111 }
+  .report-company p { font-size:8.5pt;color:#555;margin:2px 0 }
+  .report-title { text-align:center;margin-bottom:1.5rem }
+  .report-title h2 { font-size:14pt;color:#2563eb;margin:0 0 4px }
+  .report-title span { font-size:8.5pt;color:#888 }
+  table { width:100%;border-collapse:collapse;margin-bottom:1rem }
+  th { background:#2563eb;color:#fff;padding:6px 8px;font-size:9pt;text-align:left;font-weight:600 }
+  td { padding:5px 8px;font-size:9pt;border-bottom:1px solid #ddd }
+  tr:nth-child(even) td { background:#f8f9fb }
+  .status-badge { display:inline-block;padding:1px 6px;border-radius:3px;font-size:8pt;font-weight:600 }
+  .status-completed { background:#d1fae5;color:#065f46 }
+  .status-pending { background:#fef3c7;color:#92400e }
+  .status-overdue { background:#fee2e2;color:#991b1b }
+  .report-footer { position:fixed;bottom:10mm;left:15mm;right:15mm;text-align:center;font-size:8pt;color:#999;border-top:1px solid #ddd;padding-top:4mm }
+  .report-meta { font-size:8.5pt;color:#888;margin-bottom:1rem }
+  @media print { .report-footer { position:fixed } }
+</style>
+</head>
+<body>
+  <div class="report-header">
+    ${cs.logo ? `<div class="report-logo"><img src="${cs.logo}"></div>` : ''}
+    <div class="report-company">
+      <h1>${cs.name || 'OpsVision'}</h1>
+      ${cs.cnpj ? '<p>CNPJ: ' + cs.cnpj + '</p>' : ''}
+      ${cs.address ? '<p>' + cs.address + '</p>' : ''}
+      ${cs.phone || cs.email ? '<p>' + [cs.phone, cs.email].filter(Boolean).join(' | ') + '</p>' : ''}
+    </div>
+  </div>
+  <div class="report-title">
+    <h2>${title}</h2>
+    <span>Gerado em ${dateStr}</span>
+  </div>
+  ${contentHtml}
+  <div class="report-footer">OpsVision — Sistema de Gestão Operacional</div>
+</body>
+</html>`;
+
+  const w = window.open('', '_blank');
+  w.document.write(printHtml);
+  w.document.close();
+  setTimeout(() => { w.print(); }, 500);
+}
+
+async function printTasks() {
+  const tasks = await getCachedTasks();
+  const employees = await getCachedEmployees();
+  const taskAssignees = await getCachedTaskAssignees() || [];
+  const assigneeMap = {};
+  for (const ta of taskAssignees) {
+    if (!assigneeMap[ta.task_id]) assigneeMap[ta.task_id] = [];
+    assigneeMap[ta.task_id].push(ta.employee_id);
+  }
+  const today = todayBrasil();
+
+  const rows = tasks.sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)).map(t => {
+    const aIds = assigneeMap[t.id] || (t.assignee ? [t.assignee] : []);
+    const names = aIds.map(id => employees.find(e => e.id === id)?.name || '—').join(', ');
+    const overdue = t.status !== 'completed' && t.date < today;
+    const statusClass = t.status === 'completed' ? 'completed' : overdue ? 'overdue' : 'pending';
+    const statusName = t.status === 'completed' ? 'Concluída' : overdue ? 'Atrasada' : 'Pendente';
+    return `<tr>
+      <td>${t.title}</td>
+      <td>${names}</td>
+      <td>${t.date}</td>
+      <td>${t.time}</td>
+      <td><span class="status-badge status-${statusClass}">${statusName}</span></td>
+    </tr>`;
+  }).join('');
+
+  const completed = tasks.filter(t => t.status === 'completed').length;
+  const pending = tasks.filter(t => t.status === 'pending').length;
+  const overdue = tasks.filter(t => t.status !== 'completed' && t.date < today).length;
+
+  await printReport('Relatório de Tarefas', `
+    <div class="report-meta">Total: ${tasks.length} | Concluídas: ${completed} | Pendentes: ${pending} | Atrasadas: ${overdue}</div>
+    <table>
+      <thead><tr><th>Título</th><th>Responsável(is)</th><th>Data</th><th>Hora</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`);
+}
+
+async function printTeam() {
+  const employees = await getCachedEmployees();
+  const sectors = await getCachedSectors();
+  const allocations = await getCachedAllocations() || [];
+
+  const sectorNames = {};
+  for (const s of sectors) sectorNames[s.id] = s.name;
+  const allocMap = {};
+  for (const a of allocations) allocMap[a.employee_id] = sectorNames[a.area] || a.area;
+
+  const rows = employees.map(e => {
+    const area = allocMap[e.area] || allocMap[e.id] || '—';
+    return `<tr>
+      <td>${e.name}</td>
+      <td>${e.role || '—'}</td>
+      <td>${area}</td>
+      <td>${e.status === 'free' ? 'Livre' : e.status === 'busy' ? 'Ocupado' : 'Em Tarefa'}</td>
+    </tr>`;
+  }).join('');
+
+  await printReport('Relatório da Equipe', `
+    <div class="report-meta">Total de funcionários: ${employees.length}</div>
+    <table>
+      <thead><tr><th>Nome</th><th>Cargo</th><th>Setor</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`);
 }
 
 function renderSectorCard(s, idx, isDefault = false) {
@@ -3179,7 +4495,10 @@ async function editSector(idx) {
   `);
 }
 
-async function saveEditSector(sid) {
+async function saveEditSector(idx) {
+  const dbSectors = settingsSectors.length > 0 ? settingsSectors : areasList;
+  const sector = dbSectors[idx];
+  if (!sector || !sector.id) { showToast('Setor não encontrado no banco.', 'error'); return; }
   const name = document.getElementById('sector-name-edit').value.trim();
   if (!name) { showToast('Nome obrigatório', 'error'); return; }
   const icon = document.getElementById('sector-icon-edit').value.trim() || '';
@@ -3187,7 +4506,7 @@ async function saveEditSector(sid) {
   const goal = document.getElementById('sector-goal-edit').value.trim() || '';
   const target = document.getElementById('sector-target-edit').value.trim() || '';
 
-  await db.updateSector(sid, { name, icon, max_capacity: capacity, goal, target });
+  await db.updateSector(sector.id, { name, icon, max_capacity: capacity, goal, target });
   invalidateCache('sectors');
   closeModal();
   renderSettings();
@@ -3210,8 +4529,7 @@ async function deleteSector(idx) {
    ============================================ */
 function showNewRecurrenceOptionModal() {
   openModal('Nova Opção de Recorrência', `
-    <div class="form-group"><label>Identificador (ex: quarterly)</label><input type="text" id="rec-key" placeholder="quarterly"></div>
-    <div class="form-group"><label>Rótulo (ex: Trimestral)</label><input type="text" id="rec-label" placeholder="Trimestral"></div>
+    <div class="form-group"><label>Nome</label><input type="text" id="rec-label" placeholder="Ex: Trimestral"></div>
     <div class="form-group"><label>Ordem</label><input type="number" id="rec-order" value="10" min="0"></div>
     <div class="form-row">
       <button class="btn btn-primary" onclick="saveNewRecurrenceOption()">Salvar</button>
@@ -3221,10 +4539,10 @@ function showNewRecurrenceOptionModal() {
 }
 
 async function saveNewRecurrenceOption() {
-  const key = document.getElementById('rec-key').value.trim();
   const label = document.getElementById('rec-label').value.trim();
   const order = parseInt(document.getElementById('rec-order').value) || 10;
-  if (!key || !label) { showToast('Preencha identificador e rótulo', 'error'); return; }
+  if (!label) { showToast('Preencha o nome', 'error'); return; }
+  const key = label.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'custom';
 
   const opt = { id: uid(), key, label, sort_order: order };
   await db.insertRecurrenceOption(opt);
@@ -3242,8 +4560,7 @@ function editRecurrenceOption(idx) {
   const r = opts[idx];
   if (!r) return;
   openModal('Editar Opção de Recorrência', `
-    <div class="form-group"><label>Identificador</label><input type="text" id="rec-key-edit" value="${r.key}"></div>
-    <div class="form-group"><label>Rótulo</label><input type="text" id="rec-label-edit" value="${r.label}"></div>
+    <div class="form-group"><label>Nome</label><input type="text" id="rec-label-edit" value="${r.label}"></div>
     <div class="form-group"><label>Ordem</label><input type="number" id="rec-order-edit" value="${r.sort_order || 10}" min="0"></div>
     <div class="form-row">
       <button class="btn btn-primary" onclick="saveEditRecurrenceOption(${idx})">Salvar</button>
@@ -3256,10 +4573,10 @@ async function saveEditRecurrenceOption(idx) {
   const opts = App.state.recurrenceOptions;
   const r = opts && opts[idx];
   if (!r || !r.id) { showToast('Opção não encontrada no banco', 'error'); return; }
-  const key = document.getElementById('rec-key-edit').value.trim();
   const label = document.getElementById('rec-label-edit').value.trim();
-  if (!key || !label) { showToast('Preencha todos os campos', 'error'); return; }
+  if (!label) { showToast('Preencha o nome', 'error'); return; }
   const sortOrder = parseInt(document.getElementById('rec-order-edit').value) || 10;
+  const key = label.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'custom';
 
   await db.updateRecurrenceOption(r.id, { key, label, sort_order: sortOrder });
   invalidateCache('recurrenceOptions');
@@ -3381,9 +4698,13 @@ function setupEvents() {
   });
 
   document.getElementById('modal-close').addEventListener('click', closeModal);
-  document.getElementById('modal-overlay').addEventListener('click', e => {
-    if (e.target === e.currentTarget) closeModal();
-  });
+  // Click outside fecha modal apenas em dispositivos touch (mobile/tablet)
+  const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
+  if (isTouchDevice) {
+    document.getElementById('modal-overlay').addEventListener('click', e => {
+      if (e.target === e.currentTarget) closeModal();
+    });
+  }
 
   document.getElementById('btn-new-task').addEventListener('click', showNewTaskModal);
   document.getElementById('btn-new-employee').addEventListener('click', showNewEmployeeModal);
@@ -3461,6 +4782,181 @@ function showNotificationPopup(html, type) {
     const body = html.replace(/<[^>]*>/g, '').trim();
     showBrowserNotif(title, body);
   }
+}
+
+/* ============================================
+   ONBOARDING WIZARD
+   ============================================ */
+async function checkOnboarding() {
+  try {
+    const company = await db.getCompany(App.state.user.company_id);
+    if (!company) return;
+
+    const onboardedKey = 'ops-onboarded-' + company.id;
+    if (localStorage.getItem(onboardedKey)) return;
+    if (company.setup_completed) {
+      localStorage.setItem(onboardedKey, '1');
+      return;
+    }
+
+    const sectors = await db.getSectors();
+    if (sectors && sectors.length > 0) {
+      try { await db.updateCompany(company.id, { setup_completed: true }); } catch (e) {}
+      localStorage.setItem(onboardedKey, '1');
+      return;
+    }
+    showOnboardingWizard(company, onboardedKey);
+  } catch (e) {
+    // Migration may be pending — skip
+  }
+}
+
+function showOnboardingWizard(company, onboardedKey) {
+  const steps = [
+    {
+      icon: '🚀', title: 'Bem-vindo ao OpsVision!',
+      desc: 'Sistema de gestão operacional para sua empresa.',
+      body: `
+        <div class="onboard-feature-list">
+          <div class="onboard-feature"><div class="onboard-feature-icon">📊</div><div class="onboard-feature-text"><strong>Central de Controle</strong><span>Painel em tempo real com métricas, gráficos e indicadores do seu negócio</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">👥</div><div class="onboard-feature-text"><strong>Gestão de Equipe</strong><span>Cadastre funcionários, defina setores, alocações e escalas de trabalho</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">📋</div><div class="onboard-feature-text"><strong>Tarefas Inteligentes</strong><span>Crie tarefas com comprovação, recorrência e múltiplos responsáveis</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">🤖</div><div class="onboard-feature-text"><strong>OPS AI</strong><span>Assistente inteligente integrado via Groq — tire dúvidas, peça análises e sugestões em linguagem natural</span></div></div>
+        </div>`,
+    },
+    {
+      icon: '👥', title: 'Sua Equipe',
+      desc: 'Gerencie funcionários, setores e alocações.',
+      body: `
+        <div class="onboard-feature-list">
+          <div class="onboard-feature"><div class="onboard-feature-icon">➕</div><div class="onboard-feature-text"><strong>Cadastro de Funcionários</strong><span>Adicione colaboradores com cargo, nível de acesso e status</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">📍</div><div class="onboard-feature-text"><strong>Alocação por Setor</strong><span>Distribua sua equipe nos setores da empresa</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">🔑</div><div class="onboard-feature-text"><strong>Login Individual</strong><span>Crie acesso para cada funcionário com email e senha</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">📅</div><div class="onboard-feature-text"><strong>Escalas</strong><span>Defina dias de trabalho, folga e férias</span></div></div>
+        </div>`,
+    },
+    {
+      icon: '🤖', title: 'Inteligência Artificial',
+      desc: 'OPS AI — seu assistente inteligente integrado.',
+      body: `
+        <div class="onboard-feature-list">
+          <div class="onboard-feature"><div class="onboard-feature-icon">💬</div><div class="onboard-feature-text"><strong>Chat Natural</strong><span>Pergunte "quantas tarefas estão atrasadas?" ou "resuma o dia" — a IA entende contexto</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">📊</div><div class="onboard-feature-text"><strong>Análise de Dados</strong><span>A IA consulta dados reais do sistema: tarefas, equipe, metas, alocações</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">⚡</div><div class="onboard-feature-text"><strong>Groq LLM</strong><span>Motor rápido e gratuito (llama-3.1-8b). Sem custos, sem limite de uso</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">🔧</div><div class="onboard-feature-text"><strong>Chave Padrão</strong><span>Já incluímos uma chave Groq funcional. Você pode trocar nas Configurações</span></div></div>
+        </div>`,
+    },
+    {
+      icon: '📋', title: 'Tarefas & Metas',
+      desc: 'Acompanhe o que precisa ser feito.',
+      body: `
+        <div class="onboard-feature-list">
+          <div class="onboard-feature"><div class="onboard-feature-icon">✅</div><div class="onboard-feature-text"><strong>Criação e Execução</strong><span>Atribua tarefas com data, hora e opção de comprovação com foto</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">🔄</div><div class="onboard-feature-text"><strong>Recorrência</strong><span>Tarefas diárias, semanais, mensais — repetem automaticamente</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">👤</div><div class="onboard-feature-text"><strong>Múltiplos Responsáveis</strong><span>Uma tarefa pode ter vários funcionários responsáveis</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">⭐</div><div class="onboard-feature-text"><strong>Avaliação de Qualidade</strong><span>Gestores avaliam tarefas concluídas com nota e feedback</span></div></div>
+        </div>`,
+    },
+    {
+      icon: '⚙️', title: 'Configurar Setores',
+      desc: 'Vamos configurar os setores da sua empresa para começar.',
+      body: `
+        <p style="font-size:.85rem;color:var(--text-muted);margin:0 0 1rem">Adicione os setores da sua empresa. Ex: Recepção, Operações, Segurança, Manutenção.</p>
+        <div id="onboard-sectors-list"></div>
+        <div class="onboard-add-sector" onclick="addOnboardSector()">➕ Adicionar setor</div>`,
+    },
+  ];
+
+  let currentStep = 0;
+  const containerId = 'onboard-container';
+  const existing = document.getElementById(containerId);
+  if (existing) existing.remove();
+
+  function renderStep() {
+    const step = steps[currentStep];
+    const isLast = currentStep === steps.length - 1;
+    const overlay = document.getElementById(containerId);
+    if (!overlay) return;
+
+    overlay.innerHTML = `
+      <div class="onboard-box">
+        <div class="onboard-header">
+          <div class="onboard-icon">${step.icon}</div>
+          <h2>${step.title}</h2>
+          <p>${step.desc}</p>
+        </div>
+        <div class="onboard-body">${step.body}</div>
+        <div class="onboard-step-indicator">
+          ${steps.map((_, i) => `<div class="onboard-dot ${i === currentStep ? 'active' : i < currentStep ? 'done' : ''}"></div>`).join('')}
+        </div>
+        <div class="onboard-footer">
+          <button class="btn btn-secondary" onclick="skipOnboarding()">Pular</button>
+          <div>
+            ${currentStep > 0 ? `<button class="btn btn-secondary" onclick="onboardPrev()" style="margin-right:.5rem">Voltar</button>` : ''}
+            <button class="btn btn-primary" onclick="${isLast ? 'finishOnboarding()' : 'onboardNext()'}">${isLast ? 'Finalizar' : 'Próximo'}</button>
+          </div>
+        </div>
+      </div>`;
+
+    if (isLast) populateSectorFields();
+  }
+
+  function populateSectorFields() {
+    const list = document.getElementById('onboard-sectors-list');
+    if (!list) return;
+    if (!list.children.length) {
+      ['Recepção','Operações','Segurança','Manutenção'].forEach(name => addOnboardSector(name));
+    }
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = containerId;
+  overlay.className = 'onboard-overlay';
+  document.body.appendChild(overlay);
+
+  const dismiss = () => {
+    overlay.remove();
+    localStorage.setItem(onboardedKey, '1');
+  };
+
+  window.onboardNext = () => { currentStep++; renderStep(); };
+  window.onboardPrev = () => { currentStep--; renderStep(); };
+  window.skipOnboarding = () => dismiss();
+  window.addOnboardSector = (name) => {
+    const list = document.getElementById('onboard-sectors-list');
+    if (!list) return;
+    const row = document.createElement('div');
+    row.className = 'onboard-sector-row';
+    row.innerHTML = `
+      <input type="text" class="auto-config-input" placeholder="Nome do setor" value="${name || ''}">
+      <input type="number" class="auto-config-input" placeholder="Capacidade" value="5" style="width:90px">
+      <button class="btn btn-sm btn-danger" onclick="this.parentElement.remove()" style="padding:4px 8px;font-size:.7rem">&times;</button>`;
+    list.appendChild(row);
+  };
+  window.finishOnboarding = async () => {
+    try {
+      const rows = document.querySelectorAll('#onboard-sectors-list .onboard-sector-row');
+      const sectors = [];
+      rows.forEach(row => {
+        const name = row.querySelector('input[type="text"]')?.value.trim();
+        const capacity = parseInt(row.querySelector('input[type="number"]')?.value) || 0;
+        if (name) sectors.push({ name, capacity });
+      });
+      for (const s of sectors) {
+        await db.insertSector({ id: uid(), name: s.name, icon: '🏢', max_capacity: s.capacity, goal: 0, target: 0 });
+      }
+      try {
+        await db.updateCompany(App.state.user.company_id, { setup_completed: true });
+      } catch (e) { /* column may not exist */ }
+      invalidateCache('sectors');
+      dismiss();
+      showToast('Configuração concluída! Bem-vindo ao OpsVision 🚀', 'success');
+    } catch (e) {
+      showToast('Erro ao salvar setores: ' + e.message, 'error');
+    }
+  };
+
+  renderStep();
 }
 
 /* ============================================
@@ -3595,9 +5091,24 @@ function loadTheme() {
 }
 
 /* ============================================
+   BLOCK DEVTOOLS
+   ============================================ */
+function blockDevTools() {
+  document.addEventListener('contextmenu', e => e.preventDefault());
+  document.addEventListener('keydown', e => {
+    if (e.key === 'F12' ||
+        (e.ctrlKey && e.shiftKey && ['I','J','C'].includes(e.key.toUpperCase())) ||
+        (e.ctrlKey && e.key.toUpperCase() === 'U')) {
+      e.preventDefault();
+    }
+  });
+}
+
+/* ============================================
    INIT
    ============================================ */
 (async function init() {
+  blockDevTools();
   loadTheme();
   setupEvents();
   setupSearch();

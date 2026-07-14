@@ -224,6 +224,44 @@ const db = {
       .eq('company_id', _companyId).eq('id', id);
     if (error) throw error;
   },
+  // Task multi-assignee
+  async getTaskAssignees(taskId) {
+    const { data, error } = await sb.from('task_assignees').select('*')
+      .eq('company_id', _companyId).eq('task_id', taskId);
+    if (error) throw error;
+    return data || [];
+  },
+  async getAllTaskAssignees() {
+    const { data, error } = await sb.from('task_assignees').select('*')
+      .eq('company_id', _companyId);
+    if (error) throw error;
+    return data || [];
+  },
+  async insertTaskAssignee(rec) {
+    rec.company_id = _companyId;
+    if (!rec.id) rec.id = uid();
+    const { data, error } = await sb.from('task_assignees').insert(rec).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async deleteTaskAssignees(taskId) {
+    const { error } = await sb.from('task_assignees').delete()
+      .eq('company_id', _companyId).eq('task_id', taskId);
+    if (error) throw error;
+  },
+  // Company onboarding
+  async getCompany(id) {
+    const { data, error } = await sb.from('companies').select('*')
+      .eq('id', id).single();
+    if (error) return null;
+    return data;
+  },
+  async updateCompany(id, updates) {
+    const { data, error } = await sb.from('companies').update(updates)
+      .eq('id', id).select().single();
+    if (error) throw error;
+    return data;
+  },
   async executeTask(id, status, evidence) {
     const updates = {
       status,
@@ -381,6 +419,15 @@ const db = {
     const { data: urlData } = sb.storage.from('evidence-photos').getPublicUrl(path);
     return urlData.publicUrl;
   },
+  async uploadCompanyLogo(file) {
+    const ext = file.name.split('.').pop() || 'png';
+    const path = `company_${_companyId}/logo.${ext}`;
+    const { data, error } = await sb.storage.from('evidence-photos')
+      .upload(path, file, { contentType: file.type, upsert: true });
+    if (error) throw error;
+    const { data: urlData } = sb.storage.from('evidence-photos').getPublicUrl(path);
+    return urlData.publicUrl;
+  },
   async deletePhoto(path) {
     const { error } = await sb.storage.from('evidence-photos').remove([path]);
     if (error) throw error;
@@ -488,6 +535,181 @@ const db = {
       .eq('company_id', _companyId).eq('id', id).select().single();
     if (error) throw error;
     return data;
+  },
+
+  // ============================================
+  // JORNADA (Shift Control)
+  // ============================================
+  async getJornada(employeeId, date) {
+    const { data, error } = await sb.from('jornada').select('*')
+      .eq('company_id', _companyId).eq('employee_id', employeeId).eq('date', date).maybeSingle();
+    if (error) throw error;
+    return data;
+  },
+  async upsertJornada(record) {
+    record.company_id = _companyId;
+    const { data, error } = await sb.from('jornada').upsert(record, { onConflict: 'employee_id,date' }).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async getActiveJornadas() {
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+    const { data, error } = await sb.from('jornada').select('*')
+      .eq('company_id', _companyId).eq('date', today)
+      .in('status', ['working','on_break']);
+    if (error) throw error;
+    return data || [];
+  },
+
+  // ============================================
+  // GOALS (Metas)
+  // ============================================
+  async getGoals(type, targetId) {
+    let q = sb.from('goals').select('*').eq('company_id', _companyId);
+    if (type) q = q.eq('type', type);
+    if (targetId) q = q.eq('target_id', targetId);
+    const { data, error } = await q.order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  },
+  async insertGoal(g) {
+    g.company_id = _companyId;
+    if (!g.id) g.id = uid();
+    const { data, error } = await sb.from('goals').insert(g).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async updateGoal(id, updates) {
+    const { data, error } = await sb.from('goals').update(updates)
+      .eq('company_id', _companyId).eq('id', id).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async deleteGoal(id) {
+    await sb.from('goals').delete().eq('company_id', _companyId).eq('id', id);
+  },
+
+  // ============================================
+  // QUALITY RATINGS
+  // ============================================
+  async insertQualityRating(r) {
+    r.company_id = _companyId;
+    if (!r.id) r.id = uid();
+    const { data, error } = await sb.from('quality_ratings').insert(r).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async getQualityRatings(taskId) {
+    const { data, error } = await sb.from('quality_ratings').select('*')
+      .eq('company_id', _companyId).eq('task_id', taskId);
+    if (error) throw error;
+    return data || [];
+  },
+
+  // ============================================
+  // AUDIT LOGS
+  // ============================================
+  async insertAuditLog(log) {
+    log.company_id = _companyId;
+    if (!log.id) log.id = uid();
+    const { error } = await sb.from('audit_logs').insert(log);
+    if (error) throw error;
+  },
+  async getAuditLogs(limit = 50) {
+    const { data, error } = await sb.from('audit_logs').select('*')
+      .eq('company_id', _companyId).order('created_at', { ascending: false }).limit(limit);
+    if (error) throw error;
+    return data || [];
+  },
+
+  // ============================================
+  // FEEDBACKS
+  // ============================================
+  async insertFeedback(f) {
+    f.company_id = _companyId;
+    if (!f.id) f.id = uid();
+    const { data, error } = await sb.from('employee_feedbacks').insert(f).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async getFeedbacks(employeeId) {
+    const { data, error } = await sb.from('employee_feedbacks').select('*')
+      .eq('company_id', _companyId).eq('employee_id', employeeId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  },
+
+  // ============================================
+  // EMPLOYEE DOCUMENTS
+  // ============================================
+  async insertEmployeeDoc(doc) {
+    doc.company_id = _companyId;
+    if (!doc.id) doc.id = uid();
+    const { data, error } = await sb.from('employee_documents').insert(doc).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async getEmployeeDocs(employeeId) {
+    const { data, error } = await sb.from('employee_documents').select('*')
+      .eq('company_id', _companyId).eq('employee_id', employeeId).order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  },
+  async deleteEmployeeDoc(id) {
+    await sb.from('employee_documents').delete().eq('company_id', _companyId).eq('id', id);
+  },
+
+  // ============================================
+  // COMPANY DOCUMENTS
+  // ============================================
+  async getCompanyDocs() {
+    const { data, error } = await sb.from('company_documents').select('*')
+      .eq('company_id', _companyId).order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  },
+  async insertCompanyDoc(doc) {
+    doc.company_id = _companyId;
+    if (!doc.id) doc.id = uid();
+    const { data, error } = await sb.from('company_documents').insert(doc).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async updateCompanyDoc(id, updates) {
+    const { data, error } = await sb.from('company_documents').update(updates)
+      .eq('company_id', _companyId).eq('id', id).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async deleteCompanyDoc(id) {
+    await sb.from('company_documents').delete().eq('company_id', _companyId).eq('id', id);
+  },
+
+  // ============================================
+  // AUTOMATION RULES
+  // ============================================
+  async getAutomationRules() {
+    const { data, error } = await sb.from('automation_rules').select('*')
+      .eq('company_id', _companyId).order('created_at', { ascending: false });
+    if (error) throw error;
+    return data || [];
+  },
+  async insertAutomationRule(rule) {
+    rule.company_id = _companyId;
+    if (!rule.id) rule.id = uid();
+    const { data, error } = await sb.from('automation_rules').insert(rule).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async updateAutomationRule(id, updates) {
+    const { data, error } = await sb.from('automation_rules').update(updates)
+      .eq('company_id', _companyId).eq('id', id).select().single();
+    if (error) throw error;
+    return data;
+  },
+  async deleteAutomationRule(id) {
+    await sb.from('automation_rules').delete().eq('company_id', _companyId).eq('id', id);
   },
 };
 
