@@ -1625,7 +1625,7 @@ function showNewTaskModal() {
       <div class="form-group"><label>Descrição</label><textarea id="task-desc" placeholder="Descrição detalhada"></textarea></div>
       <div class="form-group"><label>Responsáveis (selecione um ou mais)</label>
         <div style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem;background:var(--bg-card)">
-          ${workingEmployees.map(e => `<label style="display:flex;align-items:center;gap:.5rem;padding:.25rem .35rem;cursor:pointer;border-radius:4px;font-size:.85rem"><input type="checkbox" class="task-assignee-cb" value="${e.id}" checked> ${e.name}</label>`).join('')}
+          ${workingEmployees.map(e => `<label style="display:flex;align-items:center;gap:.5rem;padding:.25rem .35rem;cursor:pointer;border-radius:4px;font-size:.85rem"><input type="checkbox" class="task-assignee-cb" value="${e.id}"> ${e.name}</label>`).join('')}
         </div>
       </div>
       <div class="form-row">
@@ -1649,15 +1649,15 @@ function showNewTaskModal() {
   });
 }
 
-function getSelectedAssignees(prefix) {
-  const cbs = document.querySelectorAll((prefix || '') + '.task-assignee-cb:checked');
+function getSelectedAssignees() {
+  const cbs = document.querySelectorAll('.task-assignee-cb:checked');
   return Array.from(cbs).map(cb => parseInt(cb.value)).filter(v => v);
 }
 
 async function saveNewTask() {
   const title = document.getElementById('task-title').value.trim();
   const description = document.getElementById('task-desc').value.trim();
-  const assignees = getSelectedAssignees('#');
+  const assignees = getSelectedAssignees();
   const date = document.getElementById('task-date').value;
   const time = document.getElementById('task-time').value;
   const recurrence = document.getElementById('task-recurrence').value;
