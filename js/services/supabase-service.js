@@ -428,6 +428,15 @@ const db = {
     const { data: urlData } = sb.storage.from('evidence-photos').getPublicUrl(path);
     return urlData.publicUrl;
   },
+  async uploadDoc(file) {
+    const ext = file.name.split('.').pop() || 'pdf';
+    const path = `company_${_companyId}/docs/${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+    const { data, error } = await sb.storage.from('evidence-photos')
+      .upload(path, file, { contentType: file.type, upsert: false });
+    if (error) throw error;
+    const { data: urlData } = sb.storage.from('evidence-photos').getPublicUrl(path);
+    return urlData.publicUrl;
+  },
   async deletePhoto(path) {
     const { error } = await sb.storage.from('evidence-photos').remove([path]);
     if (error) throw error;

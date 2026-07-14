@@ -1,0 +1,12 @@
+{
+  "name": "opsvision-api",
+  "version": "1.0.0",
+  "description": "OPS Vision - Backend API (AI proxy + file uploads)",
+  "main": "serve.js",
+  "scripts": {
+    "start": "node serve.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

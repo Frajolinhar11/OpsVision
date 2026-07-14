@@ -3688,15 +3688,7 @@ async function saveDoc(existingId) {
   if (fileInput && fileInput.files && fileInput.files[0]) {
     const file = fileInput.files[0];
     document.getElementById('doc-upload-progress').style.display = 'block';
-    const reader = new FileReader();
-    const b64 = await new Promise(resolve => { reader.onload = e => resolve(e.target.result.split(',')[1]); reader.readAsDataURL(file); });
-    const res = await fetch('/api/upload', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: file.name, data: b64 }),
-    });
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    file_url = data.url;
+    file_url = await db.uploadDoc(file);
   }
   try {
     const doc = { name, category, file_url, employee_id };
@@ -4110,9 +4102,9 @@ Tarefas recentes:
 ${context.recentTasks.map(t => '- "' + t.title + '" | ' + t.status + ' | ' + t.date + ' | ' + t.assignee).join('\n')}`;
 
   try {
-    const res = await fetch('/api/ai', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: [{ role: 'user', content: q }], systemPrompt, apiKey, provider: 'groq' }),
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
+      body: JSON.stringify({ model: 'llama-3.1-8b-instant', messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: q }] }),
     });
     if (!res.ok) throw new Error('API retornou ' + res.status + ': ' + (await res.text()));
     const data = await res.json();
