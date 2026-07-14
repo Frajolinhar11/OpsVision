@@ -1623,9 +1623,9 @@ function showNewTaskModal() {
     openModal('Nova Tarefa', `
       <div class="form-group"><label>Título</label><input type="text" id="task-title" placeholder="Título da tarefa"></div>
       <div class="form-group"><label>Descrição</label><textarea id="task-desc" placeholder="Descrição detalhada"></textarea></div>
-      <div class="form-group"><label>Responsáveis (selecione um ou mais)</label>
-        <div style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem;background:var(--bg-card)">
-          ${workingEmployees.map(e => `<label style="display:flex;align-items:center;gap:.5rem;padding:.25rem .35rem;cursor:pointer;border-radius:4px;font-size:.85rem"><input type="checkbox" class="task-assignee-cb" value="${e.id}"> ${e.name}</label>`).join('')}
+      <div class="form-group"><label>Responsáveis</label>
+        <div class="task-assignee-list">
+          ${workingEmployees.map(e => `<label><input type="checkbox" class="task-assignee-cb" value="${e.id}"> ${e.name}</label>`).join('')}
         </div>
       </div>
       <div class="form-row">
@@ -1702,8 +1702,8 @@ async function editTask(id) {
     <div class="form-group"><label>Título</label><input type="text" id="task-title-edit" value="${t.title}"></div>
     <div class="form-group"><label>Descrição</label><textarea id="task-desc-edit">${t.description || ''}</textarea></div>
     <div class="form-group"><label>Responsáveis</label>
-      <div style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:.35rem;background:var(--bg-card)">
-        ${workingEmployees.map(e => `<label style="display:flex;align-items:center;gap:.5rem;padding:.25rem .35rem;cursor:pointer;border-radius:4px;font-size:.85rem"><input type="checkbox" class="task-assignee-cb-edit" value="${e.id}" ${currentIds.includes(e.id) ? 'checked' : ''}> ${e.name}</label>`).join('')}
+      <div class="task-assignee-list">
+        ${workingEmployees.map(e => `<label><input type="checkbox" class="task-assignee-cb-edit" value="${e.id}" ${currentIds.includes(e.id) ? 'checked' : ''}> ${e.name}</label>`).join('')}
       </div>
     </div>
     <div class="form-row">
