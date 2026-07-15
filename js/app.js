@@ -591,8 +591,10 @@ function navigateTo(page) {
   App.state.currentPage = page;
 
   const titles = {
-    dashboard: 'Dashboard', agenda: 'Agenda', tasks: 'Tarefas', team: 'Equipe',
-    meetings: 'Reuniões', reports: 'Relatórios', 'notifications-page': 'Notificações', map: 'Mapa Operacional',
+    dashboard: 'Painel', agenda: 'Agenda', tasks: 'Tarefas', team: 'Equipe',
+    meetings: 'Reuniões', reports: 'Relatórios', operations: 'Centro de Controle',
+    goals: 'Metas e KPIs', docs: 'Documentos', map: 'Mapa Operacional',
+    automation: 'Automações', 'notifications-page': 'Notificações',
     settings: 'Configurações',
   };
   document.getElementById('page-title').textContent = titles[page] || page;
@@ -1273,6 +1275,9 @@ async function showEmployeeCard(empId) {
   const completed = empTasks.filter(t => t.status === 'completed');
   const completionRate = empTasks.length ? Math.round(completed.length / empTasks.length * 100) : 0;
 
+  const badgeClass = emp.status === 'free' ? 'free' : emp.status === 'busy' ? 'busy' : 'working';
+  const badgeLabel = emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa';
+
   openModal(emp.name, `
     <div class="emp-dossier-tabs">
       <button class="emp-dossier-tab active" onclick="switchDossierTab(this,'dados')">📋 Dados</button>
@@ -1281,10 +1286,13 @@ async function showEmployeeCard(empId) {
       <button class="emp-dossier-tab" onclick="switchDossierTab(this,'docs')">📄 Documentos</button>
     </div>
     <div id="dossier-dados" class="dossier-section">
-      <div style="text-align:center;margin-bottom:1rem">
-        <div class="emp-avatar" style="background:${randomColor(emp.name)};width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:700;margin:0 auto .75rem">${getInitials(emp.name)}</div>
-        <div style="font-size:.82rem;color:var(--text-secondary)">${emp.role}</div>
-        <div style="margin-top:.5rem;display:inline-flex;align-items:center;gap:.35rem;padding:.25rem .65rem;border-radius:20px;font-size:.75rem;font-weight:500;background:${emp.status === 'free' ? 'rgba(16,185,129,.15)' : emp.status === 'busy' ? 'rgba(239,68,68,.15)' : 'rgba(59,130,246,.15)'};color:${emp.status === 'free' ? 'var(--green)' : emp.status === 'busy' ? 'var(--red)' : 'var(--blue)'}">${emp.status === 'free' ? 'Livre' : emp.status === 'busy' ? 'Ocupado' : 'Em Tarefa'}</div>
+      <div class="dossier-header">
+        <div class="dossier-avatar" style="background:${randomColor(emp.name)}">${getInitials(emp.name)}</div>
+        <div class="dossier-info">
+          <div class="dossier-name">${emp.name}</div>
+          <div class="dossier-role">${emp.role}</div>
+          <div class="dossier-badge ${badgeClass}">${badgeLabel}</div>
+        </div>
       </div>
       <div class="dossier-stats">
         <div class="dossier-stat"><span class="ds-val">${completionRate}%</span><span class="ds-lbl">Conclusão</span></div>
@@ -1292,24 +1300,30 @@ async function showEmployeeCard(empId) {
         <div class="dossier-stat"><span class="ds-val">${completed.length}</span><span class="ds-lbl">Concluídas</span></div>
       </div>
       ${isGestor() ? `
-      <div class="form-row" style="margin-top:1.25rem;flex-wrap:wrap;gap:.5rem">
+      <div class="dossier-actions">
         <button class="btn btn-sm btn-primary" onclick="closeModal();createEmployeeLogin(${emp.id})">🔑 Criar Login</button>
-        <button class="btn btn-sm btn-secondary" onclick="closeModal();showEmployeeTasks(${emp.id})">📋 Tarefas</button>
-        <button class="btn btn-sm btn-secondary" onclick="closeModal();editEmployee(${emp.id})">Editar</button>
-        <button class="btn btn-sm btn-danger" onclick="closeModal();deleteEmployee(${emp.id})">Remover</button>
+        <button class="btn btn-sm btn-outline" onclick="closeModal();showEmployeeTasks(${emp.id})">📋 Tarefas</button>
+        <button class="btn btn-sm btn-outline" onclick="closeModal();editEmployee(${emp.id})">✏️ Editar</button>
+        <button class="btn btn-sm btn-outline-danger" onclick="closeModal();deleteEmployee(${emp.id})">🗑️ Remover</button>
       </div>` : ''}
     </div>
     <div id="dossier-historico" class="dossier-section" style="display:none">
-      <div style="margin-bottom:.75rem;font-size:.88rem;color:var(--text-secondary)">Últimas tarefas realizadas</div>
-      ${empTasks.length ? empTasks.slice(0, 15).map(t => `<div class="ops-task-row" onclick="closeModal();showTaskDetail(${t.id})" style="cursor:pointer"><span>${t.status === 'completed' ? '✅' : t.date < today ? '🔴' : '⏳'}</span><span class="ops-task-title">${t.title}</span><span style="font-size:.72rem;color:var(--text-muted)">${formatDate(t.date)}</span></div>`).join('') : '<div style="color:var(--text-muted);text-align:center;padding:1rem">Nenhuma tarefa encontrada</div>'}
+      <div class="dossier-section-title">Últimas tarefas</div>
+      <div class="dossier-tasks-list">
+        ${empTasks.length ? empTasks.slice(0, 15).map(t => `<div class="dossier-task-item" onclick="closeModal();showTaskDetail(${t.id})"><span class="dti-icon">${t.status === 'completed' ? '✅' : t.date < today ? '🔴' : '⏳'}</span><span class="dti-title">${t.title}</span><span class="dti-date">${formatDate(t.date)}</span></div>`).join('') : '<div class="dossier-empty">Nenhuma tarefa encontrada</div>'}
+      </div>
     </div>
     <div id="dossier-feedbacks" class="dossier-section" style="display:none">
-      ${isGestor() ? `<button class="btn btn-sm btn-primary" onclick="addFeedback(${emp.id})" style="margin-bottom:.75rem">➕ Adicionar Feedback</button>` : ''}
-      ${feedbacks.length ? feedbacks.map(f => `<div class="ops-feedback-item"><div style="display:flex;justify-content:space-between"><strong>${'★'.repeat(f.rating)}${'☆'.repeat(5-(f.rating||0))}</strong><span style="font-size:.72rem;color:var(--text-muted)">${new Date(f.created_at).toLocaleDateString('pt-BR')}</span></div><div style="font-size:.85rem;margin-top:.25rem">${f.text}</div></div>`).join('') : '<div style="color:var(--text-muted);text-align:center;padding:1rem">Nenhum feedback ainda</div>'}
+      ${isGestor() ? `<button class="btn btn-sm btn-primary" onclick="addFeedback(${emp.id})" style="margin-bottom:.5rem">➕ Adicionar Feedback</button>` : ''}
+      <div class="dossier-feedback-list">
+        ${feedbacks.length ? feedbacks.map(f => `<div class="ops-feedback-item"><div class="fb-header"><span class="fb-rating">${'★'.repeat(f.rating)}${'☆'.repeat(5-(f.rating||0))}</span><span class="fb-date">${new Date(f.created_at).toLocaleDateString('pt-BR')}</span></div><div class="fb-text">${f.text}</div></div>`).join('') : '<div class="dossier-empty">Nenhum feedback ainda</div>'}
+      </div>
     </div>
     <div id="dossier-docs" class="dossier-section" style="display:none">
-      ${isGestor() ? `<button class="btn btn-sm btn-primary" onclick="addEmployeeDoc(${emp.id})" style="margin-bottom:.75rem">➕ Adicionar Documento</button>` : ''}
-      ${docs.length ? docs.map(d => `<div class="ops-doc-row"><span>📄 ${d.name}</span><button class="btn btn-sm btn-ghost" onclick="deleteEmployeeDoc('${d.id}')">🗑️</button></div>`).join('') : '<div style="color:var(--text-muted);text-align:center;padding:1rem">Nenhum documento</div>'}
+      ${isGestor() ? `<button class="btn btn-sm btn-primary" onclick="addEmployeeDoc(${emp.id})" style="margin-bottom:.5rem">➕ Adicionar Documento</button>` : ''}
+      <div class="dossier-doc-list">
+        ${docs.length ? docs.map(d => `<div class="ops-doc-row"><span class="doc-name">📄 ${d.name}</span><button class="btn btn-sm btn-ghost" onclick="deleteEmployeeDoc('${d.id}')">🗑️</button></div>`).join('') : '<div class="dossier-empty">Nenhum documento</div>'}
+      </div>
     </div>
   `, { large: true, maxWidth: '600px' });
 }
@@ -3979,17 +3993,16 @@ async function saveRating(taskId) {
 }
 
 /* ============================================
-   OPS AI
+   Vision IA
    ============================================ */
 function openOPSAI() {
   const msgs = App.state.aiMessages || [];
   App.state._aiSending = false;
-  showModal('🤖 OPS AI', renderAIChat(msgs));
+  showModal('Vision IA', renderAIChat(msgs));
   document.getElementById('modal-container').classList.add('large');
   document.getElementById('modal-body').style.padding = '0';
   document.getElementById('modal-body').style.display = 'flex';
   document.getElementById('modal-body').style.flexDirection = 'column';
-  // Preenche mensagens com innerHTML para suportar HTML (ex: botão retry)
   msgs.forEach((m, i) => {
     const el = document.getElementById('ai-msg-' + i);
     if (el) el.innerHTML = m.content;
@@ -4003,29 +4016,26 @@ function openOPSAI() {
 }
 
 function renderAIChat(messages) {
-  const suggested = !messages.length;
   return `
-    <div id="ai-chat" style="flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.75rem;min-height:350px;max-height:450px">
-      ${suggested ? `
-        <div style="text-align:center;color:var(--text-muted);font-size:.85rem;padding:1rem 0">Pergunte algo sobre sua operação ou clique em uma sugestão:</div>
-        <div style="display:flex;flex-wrap:wrap;gap:.4rem;justify-content:center;margin-bottom:.5rem">
-          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Como está minha operação hoje?')">📊 Status geral</button>
-          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Quem está improdutivo?')">😴 Inativos</button>
-          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Qual área com pior desempenho?')">📉 Pior área</button>
-          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Tarefas críticas atrasadas')">⚠️ Atrasadas</button>
-          <button class="btn btn-sm btn-secondary" onclick="suggestAI('Ranking de desempenho da equipe')">🏆 Ranking</button>
-        </div>
-      ` : ''}
+    <div id="ai-chat" class="ai-chat">
+      <div class="ai-welcome">Pergunte algo sobre sua operação:</div>
+      <div class="ai-suggestions">
+        <button class="btn" onclick="suggestAI('Como está minha operação hoje?')">📊 Status geral</button>
+        <button class="btn" onclick="suggestAI('Quem está improdutivo?')">😴 Inativos</button>
+        <button class="btn" onclick="suggestAI('Qual área com pior desempenho?')">📉 Pior área</button>
+        <button class="btn" onclick="suggestAI('Tarefas críticas atrasadas')">⚠️ Atrasadas</button>
+        <button class="btn" onclick="suggestAI('Ranking de desempenho da equipe')">🏆 Ranking</button>
+      </div>
       ${messages.map((m, i) => `
-        <div style="display:flex;${m.role === 'user' ? 'justify-content:flex-end' : 'justify-content:flex-start'}">
-          <div id="ai-msg-${i}" style="max-width:85%;padding:.6rem .85rem;border-radius:12px;${m.role === 'user' ? 'background:var(--blue);color:#fff;border-bottom-right-radius:4px' : 'background:var(--bg);color:var(--text);border-bottom-left-radius:4px'};white-space:pre-wrap;line-height:1.5;font-size:.88rem"></div>
+        <div class="ai-msg ${m.role}">
+          <div id="ai-msg-${i}">${m.content}</div>
         </div>
       `).join('')}
-      <div id="ai-loading" style="display:none;text-align:center;color:var(--text-muted);font-size:.82rem">🤔 Pensando...</div>
+      <div id="ai-loading" class="ai-loading">🤔 Pensando...</div>
     </div>
-    <div style="display:flex;gap:.5rem;padding:.75rem 1rem;border-top:1px solid var(--border);background:var(--bg-card)">
-      <input type="text" id="ai-input" placeholder="Digite sua pergunta..." onkeydown="if(event.key==='Enter'&&!App.state._aiSending)sendAIMessage()" style="flex:1;padding:.6rem .85rem;border-radius:20px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:.88rem;outline:none">
-      <button id="btn-ai-send" class="btn btn-primary" onclick="if(!App.state._aiSending)sendAIMessage()" style="border-radius:50%;width:38px;height:38px;padding:0;display:flex;align-items:center;justify-content:center;font-size:1.1rem">➤</button>
+    <div class="ai-input-bar">
+      <input type="text" id="ai-input" class="ai-input" placeholder="Digite sua pergunta..." onkeydown="if(event.key==='Enter'&&!App.state._aiSending)sendAIMessage()">
+      <button id="btn-ai-send" class="btn btn-primary ai-send-btn" onclick="if(!App.state._aiSending)sendAIMessage()">➤</button>
     </div>
   `;
 }
@@ -4087,7 +4097,7 @@ async function sendAIMessage(skipRender) {
     return;
   }
 
-  const systemPrompt = `Você é o OPS AI. Responda em português (pt-BR) de forma direta e profissional.
+  const systemPrompt = `Você é o Vision IA. Responda em português (pt-BR) de forma direta e profissional.
 
 DADOS DA OPERAÇÃO (${context.today}):
 - Total de funcionários: ${context.totalEmployees}
@@ -4813,7 +4823,7 @@ function showOnboardingWizard(company, onboardedKey) {
           <div class="onboard-feature"><div class="onboard-feature-icon">📊</div><div class="onboard-feature-text"><strong>Central de Controle</strong><span>Painel em tempo real com métricas, gráficos e indicadores do seu negócio</span></div></div>
           <div class="onboard-feature"><div class="onboard-feature-icon">👥</div><div class="onboard-feature-text"><strong>Gestão de Equipe</strong><span>Cadastre funcionários, defina setores, alocações e escalas de trabalho</span></div></div>
           <div class="onboard-feature"><div class="onboard-feature-icon">📋</div><div class="onboard-feature-text"><strong>Tarefas Inteligentes</strong><span>Crie tarefas com comprovação, recorrência e múltiplos responsáveis</span></div></div>
-          <div class="onboard-feature"><div class="onboard-feature-icon">🤖</div><div class="onboard-feature-text"><strong>OPS AI</strong><span>Assistente inteligente integrado via Groq — tire dúvidas, peça análises e sugestões em linguagem natural</span></div></div>
+          <div class="onboard-feature"><div class="onboard-feature-icon">🤖</div><div class="onboard-feature-text"><strong>Vision IA</strong><span>Assistente inteligente integrado via Groq — tire dúvidas, peça análises e sugestões em linguagem natural</span></div></div>
         </div>`,
     },
     {
@@ -4829,7 +4839,7 @@ function showOnboardingWizard(company, onboardedKey) {
     },
     {
       icon: '🤖', title: 'Inteligência Artificial',
-      desc: 'OPS AI — seu assistente inteligente integrado.',
+      desc: 'Vision IA — seu assistente inteligente integrado.',
       body: `
         <div class="onboard-feature-list">
           <div class="onboard-feature"><div class="onboard-feature-icon">💬</div><div class="onboard-feature-text"><strong>Chat Natural</strong><span>Pergunte "quantas tarefas estão atrasadas?" ou "resuma o dia" — a IA entende contexto</span></div></div>
