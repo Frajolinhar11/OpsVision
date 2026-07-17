@@ -4086,7 +4086,7 @@ async function sendAIMessage(skipRender) {
 
   document.getElementById('ai-loading').style.display = 'block';
 
-  const DEFAULT_GROQ_KEY = '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';
+  const DEFAULT_GROQ_KEY = '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';
   const apiKey = localStorage.getItem('ops-ai-key') || DEFAULT_GROQ_KEY;
   const context = await collectOpsContext();
 
